@@ -1,0 +1,1 @@
+import{s}from"./index-B24IFfuC.js";const r={QueryPage:"/user/page",Register:"/user/register",Update:"/user/update",UpdatePassword:"/user/updatePassword"},a=async e=>s.post(r.Register,e),p=async e=>(console.log("请求参数：",e),s.get(r.QueryPage,{params:e})),o=async e=>s.put(r.Update,e),u=async e=>s.post(r.UpdatePassword,e);export{o as a,p as q,a as r,u};

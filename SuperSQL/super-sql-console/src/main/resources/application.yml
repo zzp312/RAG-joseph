@@ -1,0 +1,61 @@
+##服务端口
+server:
+  port: 9800
+spring:
+  application:
+    ###应用名
+    name: super-sql-demo
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/xushu_rag?characterEncoding=utf8&useSSL=false
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:your-password}
+
+  ai:
+    dashscope:
+      api-key: ${DASHSCOPE_API_KEY:your-api-key}
+
+    #  当使用 Ollama时，请配置以下参数
+    #    ollama:
+    #      base-url: http://localhost:11434
+    #      chat:
+    #        options:
+    #          model: deepseek-r1:32b
+    #          temperature: 0.7
+    #      embedding:
+    #        options:
+    #          model: mxbai-embed-large
+    #      init:
+    #        pull-model-strategy: never
+    #        embedding:
+    #          additional-models:
+    #            - mxbai-embed-large
+
+    vectorstore:
+      milvus:
+        client:
+          host: "localhost" # default: localhost
+          port: 19530 # default: 19530
+          username: "" # default: root
+          password: "" # default: milvus
+        databaseName: "default"
+        collectionName: "super_sql" # default: vector_store
+        embeddingDimension: 1536 # default: 1536
+        indexType: IVF_FLAT # default: IVF_FLAT
+        metricType: COSINE # default: COSINE
+        initializeSchema: true # 自动创建集合
+    #  重排序配置，可以上gitee Ai有免费体验 或者使用Xinference本地部署
+    reranker:
+      enabled: true
+      model: Qwen3-Reranker-8B
+      api-key: ${RERANKER_API_KEY:your-api-key}
+
+mvc:
+  async:
+    request-timeout: 2000
+
+super-sql:
+  init-train: true
+  scope: ALONE  # ALL 整库训练, ALONE 单库训练
+  schemas:
+    - schema: xushu_rag  # 指定数据库

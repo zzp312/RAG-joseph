@@ -1,0 +1,87 @@
+server:
+  port: 8989
+
+spring:
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+  profiles:
+    active: dev
+  ai:
+    websearch:
+      api-key: ${WEBSEARCH_API_KEY:your-api-key}
+      searxng:
+        url: "http://127.0.0.1:8080/search"
+        nums: 10
+        engines: "duckduckgo,google,bing,brave,mojeek,presearch,qwant,startpage,yahoo,arxiv,crossref,google_scholar,internetarchivescholar,semantic_scholar"
+    dashscope:
+      api-key: ${DASHSCOPE_API_KEY:your-api-key}
+
+    vectorstore:
+      milvus:
+        client:
+          host: "192.168.1.128" # default: localhost
+          port: 19530 # default: 19530
+          username: "" # default: root
+          password: "" # default: milvus
+        databaseName: "default"
+        collectionName: "vector_store" # default: vector_store
+        embeddingDimension: 1536 # default: 1536
+        indexType: IVF_FLAT # default: IVF_FLAT
+        metricType: COSINE # default: COSINE
+        initializeSchema: true # 自动创建集合
+  datasource:
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:your-password}
+    url: jdbc:mysql://localhost:3306/ks_rag_new?serverTimezone=UTC
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    type: com.alibaba.druid.pool.DruidDataSource
+
+  data:
+    redis:
+      database: 10
+      host: ${REDIS_HOST:localhost}
+      port: 6379
+      password: ${REDIS_PASSWORD:your-password}
+      lettuce:
+        pool:
+          min-idle: 8
+          max-idle: 500
+          max-active: 2000
+          max-wait: 10000
+      timeout: 5000
+
+aliyun:
+  alioss:
+    endpoint: oss-cn-beijing.aliyuncs.com
+    access-key-id: ${ALIYUN_ACCESS_KEY_ID:your-access-key-id}
+    access-key-secret: ${ALIYUN_ACCESS_KEY_SECRET:your-access-key-secret}
+    bucket-name: ${ALIYUN_BUCKET_NAME:your-bucket-name}
+
+xushu:
+  jwt:
+    # 设置jwt签名加密时使用的秘钥
+    admin-secret-key: ${JWT_ADMIN_SECRET_KEY:your-admin-secret-key}
+    # 设置jwt过期时间
+    admin-ttl: 7200000
+    # 设置前端传递过来的令牌名称
+    admin-token-name: token
+    user-secret-key: ${JWT_USER_SECRET_KEY:your-user-secret-key}
+    user-ttl: 7200000
+    user-token-name: authorization
+
+super-sql:
+  init-train: false
+  scope: ALONE  # ALL 整库训练, ALONE 单库训练
+  schemas:
+    - schema: xushu_rag  # 指定数据库
+
+logging:
+  level:
+    org:
+      springframework:
+        ai:
+          chat:
+            client:
+              advisor: debug
