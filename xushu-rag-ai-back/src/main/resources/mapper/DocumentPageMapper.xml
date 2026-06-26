@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.xushu.rag.mapper.DocumentPageMapper">
+
+    <resultMap id="BaseResultMap" type="com.xushu.rag.entity.DocumentPage">
+        <id column="id" property="id"/>
+        <result column="source" property="source"/>
+        <result column="version" property="version"/>
+        <result column="page_number" property="pageNumber"/>
+        <result column="segment_number" property="segmentNumber"/>
+        <result column="page_text" property="pageText"/>
+    </resultMap>
+
+    <select id="selectBySourceVersionAndPages" resultMap="BaseResultMap">
+        SELECT id, source, version, page_number, segment_number, page_text
+        FROM document_pages
+        WHERE source = #{source}
+        AND version = #{version}
+        AND page_number IN
+        <foreach collection="pageNumbers" item="page" open="(" separator="," close=")">
+            #{page}
+        </foreach>
+        ORDER BY page_number, segment_number
+    </select>
+
+</mapper>

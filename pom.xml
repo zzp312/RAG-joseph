@@ -27,6 +27,8 @@
         <ik-analyzer.version>8.5.0</ik-analyzer.version>
         <mysql-connector.version>8.0.33</mysql-connector.version>
         <druid.version>1.2.20</druid.version>
+        <pdfbox.version>2.0.30</pdfbox.version>
+        <tabula.version>1.0.5</tabula.version>
 
     </properties>
 
