@@ -41,7 +41,21 @@ public class MetadataAwareQuestionAnswerAdvisor implements BaseAdvisor {
 
         if(!CollectionUtils.isEmpty(documents)) {
             String documentContext = documents == null ? ""
-                    : documents.stream().map(doc -> doc.getText()+"\n来源文件:"+doc.getMetadata().getOrDefault("source", "unknown").toString()).collect(Collectors.joining(System.lineSeparator()));
+                    : documents.stream().map(doc -> {
+                        StringBuilder sb = new StringBuilder();
+                        sb.append(doc.getText());
+                        sb.append("\n来源文件:").append(doc.getMetadata().getOrDefault("source", "unknown").toString());
+                        // 图片类型：输出Markdown格式供前端渲染
+                        String chunkType = (String) doc.getMetadata().getOrDefault("chunk_type", "");
+                        if ("IMAGE".equalsIgnoreCase(chunkType)) {
+                            Object imgUrl = doc.getMetadata().get("image_url");
+                            if (imgUrl != null && !imgUrl.toString().isEmpty()) {
+                                String safeUrl = imgUrl.toString().replace(" ", "%20");
+                                sb.append("\n![](").append(safeUrl).append(")");
+                            }
+                        }
+                        return sb.toString();
+                    }).collect(Collectors.joining(System.lineSeparator()));
 
             // 重新构建prompt，在末尾添加source信息
 

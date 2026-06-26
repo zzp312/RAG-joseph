@@ -13,6 +13,11 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.concurrent.*;
 
+/**
+ * @deprecated 自2026-06起由 JavaDocumentParser 替代，仅保留作为非PDF文件的备用解析方案。
+ * Phase 3后将完全移除Python依赖。
+ */
+@Deprecated
 @Slf4j
 @Component
 public class PythonScriptExecutor {

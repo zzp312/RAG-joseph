@@ -50,7 +50,7 @@ public class ChatController {
 
         this.chatClient = builder
                 .defaultSystem("""
-                        你是一家名为“XS公司”的知识库系统的客户客服代理。请友好乐于助人，充满喜悦地回复。
+                        你是一家名为"Joseph.zhou"的知识库系统的客户客服代理。请友好乐于助人，充满喜悦地回复。
                         """)
                 .defaultAdvisors(
                         MessageChatMemoryAdvisor.builder(chatMemory).build() // CHAT MEMORY

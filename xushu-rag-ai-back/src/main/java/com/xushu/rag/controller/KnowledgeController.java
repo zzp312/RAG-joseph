@@ -8,12 +8,18 @@ import com.xushu.rag.common.BaseResponse;
 import com.xushu.rag.common.ErrorCode;
 import com.xushu.rag.common.ResultUtils;
 import com.xushu.rag.entity.AliOssFile;
+import com.xushu.rag.entity.DocumentPage;
 import com.xushu.rag.entity.KnowledgeBase;
 import com.xushu.rag.pojo.dto.QueryFileDTO;
 import com.xushu.rag.service.AliOssFileService;
+import com.xushu.rag.service.DocumentPageService;
 import com.xushu.rag.service.DocumentService;
 import com.xushu.rag.service.KnowledgeBaseService;
+import com.xushu.rag.service.impl.DocumentPageServiceImpl;
 import com.xushu.rag.utils.AliOssUtil;
+import com.xushu.rag.utils.ImageDescriber;
+import com.xushu.rag.utils.ImageExtractor;
+import com.xushu.rag.utils.JavaDocumentParser;
 import com.xushu.rag.utils.PythonScriptExecutor;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -57,8 +63,91 @@ public class KnowledgeController {
     @Autowired
     private DocumentService documentService;
 
+    /**
+     * 页面原文服务（Small-to-Big回表查询）
+     *
+     * @author Joseph
+     */
+    @Autowired
+    private DocumentPageService documentPageService;
+
     @Autowired
     private PythonScriptExecutor pythonScriptExecutor;
+
+    /**
+     * Java原生PDF解析器（替代Python脚本）
+     *
+     * @author Joseph
+     */
+    @Autowired
+    private JavaDocumentParser javaDocumentParser;
+
+    /**
+     * PDF图片提取器（用于多模态图片理解）
+     *
+     * @author Joseph
+     */
+    @Autowired
+    private ImageExtractor imageExtractor;
+
+    /**
+     * 多模态图片描述器（通义千问VL）
+     *
+     * @author Joseph
+     */
+    @Autowired
+    private ImageDescriber imageDescriber;
+
+    /**
+     * 解析文件内容，优先使用JavaDocumentParser，PythonScriptExecutor作为备用
+     * <p>解析策略：PDF/DOCX/XLSX→JavaDocumentParser→Tika降级；其他→PythonScriptExecutor→Tika降级</p>
+     *
+     * @author Joseph
+     */
+    private ParsedContent parseDocumentContent(MultipartFile file, Path tempFilePath) throws IOException {
+        String tempPathStr = tempFilePath.toString();
+        String originalFilename = file.getOriginalFilename();
+        String lowerName = originalFilename != null ? originalFilename.toLowerCase() : "";
+        boolean isJavaSupported = lowerName.endsWith(".pdf")
+                || lowerName.endsWith(".docx")
+                || lowerName.endsWith(".xlsx")
+                || lowerName.endsWith(".xls");
+
+        JSONObject parseResult = new JSONObject();
+        String contentText;
+
+        try {
+            if (isJavaSupported) {
+                // PDF/DOCX/XLSX：使用Java原生解析
+                log.info("使用JavaDocumentParser解析: {}", originalFilename);
+                parseResult = javaDocumentParser.parse(tempPathStr);
+                if (parseResult.containsKey("error")) {
+                    throw new Exception(parseResult.getString("error"));
+                }
+                contentText = parseResult.getString("text");
+            } else {
+                // 其他格式：尝试Python解析，失败则降级Tika
+                log.info("使用PythonScriptExecutor解析非PDF文件: {}", originalFilename);
+                parseResult = pythonScriptExecutor.executeParser(tempPathStr);
+                if (parseResult.containsKey("error")) {
+                    throw new Exception(parseResult.getString("error"));
+                }
+                contentText = parseResult.getString("text");
+            }
+        } catch (Exception e) {
+            log.warn("主解析器失败，使用Tika降级解析: {}", e.getMessage());
+            Resource resource = file.getResource();
+            TikaDocumentReader reader = new TikaDocumentReader(resource);
+            List<org.springframework.ai.document.Document> documents = reader.read();
+            contentText = documents.stream()
+                    .map(org.springframework.ai.document.Document::getText)
+                    .collect(Collectors.joining("\n"));
+            parseResult = new JSONObject();
+            parseResult.put("text", contentText);
+        }
+
+        return new ParsedContent(parseResult, contentText);
+    }
 
     @Operation(summary = "upload", description = "上传附件接口（旧版，兼容原有逻辑）")
     @PostMapping(value = "file/upload", headers = "content-type=multipart/form-data")
@@ -82,7 +171,12 @@ public class KnowledgeController {
 
                 List<org.springframework.ai.document.Document> splitDocuments = tokenTextSplitter.apply(documents);
                 log.info("开始向量化，共{}个分块", splitDocuments.size());
-                vectorStore.add(splitDocuments);
+                // DashScope embedding 单次最多25条，分批写入
+                final int EMBED_BATCH = 20;
+                for (int batch = 0; batch < splitDocuments.size(); batch += EMBED_BATCH) {
+                    int toIdx = Math.min(batch + EMBED_BATCH, splitDocuments.size());
+                    vectorStore.add(splitDocuments.subList(batch, toIdx));
+                }
                 log.info("向量化完成");
 
                 long currMillis = System.currentTimeMillis();
@@ -133,25 +227,10 @@ public class KnowledgeController {
                 Path tempFilePath = saveTempFile(file);
                 String tempPathStr = tempFilePath.toString();
 
-                JSONObject parseResult;
-                String contentText;
-                try {
-                    parseResult = pythonScriptExecutor.executeParser(tempPathStr);
-                    if (parseResult.containsKey("error")) {
-                        throw new Exception(parseResult.getString("error"));
-                    }
-                    contentText = parseResult.getString("text");
-                } catch (Exception e) {
-                    log.warn("Python解析失败，使用Java解析: {}", e.getMessage());
-                    Resource resource = file.getResource();
-                    TikaDocumentReader reader = new TikaDocumentReader(resource);
-                    List<org.springframework.ai.document.Document> documents = reader.read();
-                    contentText = documents.stream()
-                            .map(org.springframework.ai.document.Document::getText)
-                            .collect(Collectors.joining("\n"));
-                    parseResult = new JSONObject();
-                    parseResult.put("text", contentText);
-                }
+                // 使用统一解析入口（PDF→JavaDocumentParser，其他→Python→Tika降级）
+                ParsedContent parsedContent = parseDocumentContent(file, tempFilePath);
+                JSONObject parseResult = parsedContent.getParseResult();
+                String contentText = parsedContent.getContentText();
 
                 Long targetKbId = kbId;
                 String targetKbName = kbName;
@@ -224,26 +303,77 @@ public class KnowledgeController {
                 }
 
                 List<org.springframework.ai.document.Document> aiDocuments = new ArrayList<>();
-                if (parseResult.containsKey("chunks")) {
+                if (parseResult.containsKey("chunks") && parseResult.getJSONArray("chunks") != null
+                        && !parseResult.getJSONArray("chunks").isEmpty()) {
                     JSONArray chunks = parseResult.getJSONArray("chunks");
+
+                    // 1. 保存页面全文到 document_pages 表（MySQL，用于检索回表）
+                    java.util.Map<Integer, StringBuilder> pageFullTexts = new java.util.LinkedHashMap<>();
+                    for (int i = 0; i < chunks.size(); i++) {
+                        JSONObject c = chunks.getJSONObject(i);
+                        Integer p = c.getInteger("page");
+                        if (p != null) {
+                            pageFullTexts.computeIfAbsent(p, k -> new StringBuilder())
+                                    .append(c.getString("text")).append("\n");
+                        }
+                    }
+                    java.util.List<DocumentPage> pageEntities = new java.util.ArrayList<>();
+                    for (java.util.Map.Entry<Integer, StringBuilder> entry : pageFullTexts.entrySet()) {
+                        String fullText = entry.getValue().toString().trim();
+                        // 超长页面分段存储（每段8000字符，段间重叠200字符）
+                        pageEntities.addAll(DocumentPageServiceImpl.splitPage(
+                                originalFilename, version, entry.getKey(), fullText, 8000, 200));
+                    }
+                    documentPageService.batchSave(pageEntities);
+
+                    // 2. 每页文本用TokenTextSplitter拆成小块（Small-to-Big: 小块embedding）
                     for (int i = 0; i < chunks.size(); i++) {
                         JSONObject chunk = chunks.getJSONObject(i);
-                        Map<String, Object> metadata = new HashMap<>();
-                        metadata.put("source", originalFilename);
-                        metadata.put("kb_id", targetKbId);
-                        metadata.put("kb_name", targetKbName);
-                        metadata.put("version", version);
-                        // 过滤null值，Spring AI Document不允许metadata中有null
                         Integer page = chunk.getInteger("page");
-                        if (page != null) {
-                            metadata.put("page", page);
+                        String chunkType = chunk.getString("type");
+                        String chunkTypeUpper = chunkType != null ? chunkType.toUpperCase() : "TEXT";
+
+                        // TEXT用TokenTextSplitter拆分；TABLE/IMAGE截断(embedding限2048token≈1500字)，不拆分
+                        String pageText = chunk.getString("text");
+                        List<org.springframework.ai.document.Document> splitDocs;
+                        if ("TEXT".equalsIgnoreCase(chunkTypeUpper)) {
+                            try {
+                                splitDocs = tokenTextSplitter.apply(
+                                        java.util.Collections.singletonList(
+                                                new org.springframework.ai.document.Document(pageText)));
+                            } catch (Exception e) {
+                                log.warn("TokenTextSplitter拆分失败，保留整块: page={}", page);
+                                splitDocs = java.util.Collections.singletonList(
+                                        new org.springframework.ai.document.Document(pageText));
+                            }
+                        } else {
+                            // TABLE/IMAGE不拆（避免表头丢失），超长则截断
+                            String safe = pageText.length() > 1500
+                                    ? pageText.substring(0, 1500) : pageText;
+                            splitDocs = java.util.Collections.singletonList(
+                                    new org.springframework.ai.document.Document(safe));
                         }
-                        String type = chunk.getString("type");
-                        if (type != null) {
-                            metadata.put("type", type);
+
+                        // 诊断日志：chunk切分质量
+                        log.info("[Chunk切分] source={}, page={}, type={}, 原文{}字 → 切为{}个chunk",
+                                originalFilename, page, chunkTypeUpper,
+                                pageText.length(), splitDocs.size());
+
+                        // 每个小块存入Milvus，metadata只存指针(page, source)
+                        for (org.springframework.ai.document.Document splitDoc : splitDocs) {
+                            Map<String, Object> metadata = new HashMap<>();
+                            metadata.put("source", originalFilename);
+                            metadata.put("kb_id", targetKbId);
+                            metadata.put("kb_name", targetKbName);
+                            metadata.put("version", version);
+                            if (page != null) {
+                                metadata.put("page", page);
+                            }
+                            metadata.put("chunk_type", chunkTypeUpper);
+                            // 不再存parent_page_text，检索时回表查document_pages
+                            aiDocuments.add(new org.springframework.ai.document.Document(
+                                    splitDoc.getText(), metadata));
                         }
-                        org.springframework.ai.document.Document aiDoc = new org.springframework.ai.document.Document(chunk.getString("text"), metadata);
-                        aiDocuments.add(aiDoc);
                     }
                 } else {
                     Resource resource = file.getResource();
@@ -261,13 +391,20 @@ public class KnowledgeController {
                         metadata.put("kb_id", targetKbId);
                         metadata.put("kb_name", targetKbName);
                         metadata.put("version", version);
+                        // Tika降级方案：chunk_type默认TEXT
+                        metadata.put("chunk_type", "TEXT");
                         aiDocuments.add(new org.springframework.ai.document.Document(doc.getText(), metadata));
                     }
                     aiDocuments = tokenTextSplitter.apply(aiDocuments);
                 }
 
-                vectorStore.add(aiDocuments);
-                log.info("向量化完成，文件: {}", originalFilename);
+                // DashScope embedding 单次最多25条，分批写入
+                final int EMBED_BATCH_SIZE = 20;
+                for (int batch = 0; batch < aiDocuments.size(); batch += EMBED_BATCH_SIZE) {
+                    int toIdx = Math.min(batch + EMBED_BATCH_SIZE, aiDocuments.size());
+                    vectorStore.add(aiDocuments.subList(batch, toIdx));
+                }
+                log.info("向量化完成，文件: {}，共{}个分块", originalFilename, aiDocuments.size());
 
                 String vectorIds = JSON.toJSONString(aiDocuments.stream().map(org.springframework.ai.document.Document::getId).collect(Collectors.toList()));
 
@@ -287,7 +424,31 @@ public class KnowledgeController {
 
                 documentService.createDocument(document);
 
-                Files.deleteIfExists(tempFilePath);
+                // 异步处理图片（多模态语义理解），不阻塞主流程
+                // 注意：临时文件由异步线程负责清理，避免竞态条件
+                final Long finalKbId = targetKbId;
+                final String finalKbName = targetKbName;
+                final String finalVersion = version;
+                final String tempPathForImage = tempPathStr;
+                final String ossUrlForImage = url;
+                final boolean isPdfFile = originalFilename != null
+                        && originalFilename.toLowerCase().endsWith(".pdf");
+                final boolean isDocxFile = originalFilename != null
+                        && originalFilename.toLowerCase().endsWith(".docx");
+
+                if (isPdfFile || isDocxFile) {
+                    final boolean isPdf = isPdfFile; // 用于线程内判断
+                    new Thread(() -> {
+                        processImagesAsync(tempPathForImage, isPdf, finalKbId, finalKbName,
+                                finalVersion, ossUrlForImage, originalFilename);
+                        try {
+                            Files.deleteIfExists(Paths.get(tempPathForImage));
+                        } catch (IOException ignored) {
+                        }
+                    }, "image-processing-" + originalFilename).start();
+                } else {
+                    Files.deleteIfExists(tempFilePath);
+                }
 
                 Map<String, Object> result = new HashMap<>();
                 result.put("fileName", originalFilename);
@@ -387,6 +548,44 @@ public class KnowledgeController {
         return documentService.getLatestDocuments(kbId);
     }
 
+    /**
+     * 批量查询多个知识库的最新版本文档
+     * <p>用于前端知识库级联选择：选中多个知识库后获取对应文件列表</p>
+     *
+     * @param kbIds 知识库ID列表
+     * @return 合并后的文档列表
+     * @author Joseph
+     */
+    @Operation(summary = "latestDocsBatch", description = "批量获取多个知识库的最新版本文档")
+    @GetMapping("/latest-docs-batch")
+    public BaseResponse getLatestDocumentsBatch(@RequestParam(required = false) List<Long> kbIds) {
+        if (kbIds == null || kbIds.isEmpty()) {
+            // 无知识库筛选时返回全部文档
+            return aliOssFileService.queryPage(new QueryFileDTO() {{
+                setPage(0);
+                setPageSize(500);
+            }});
+        }
+        List<java.util.Map<String, Object>> allDocs = new java.util.ArrayList<>();
+        for (Long kbId : kbIds) {
+            BaseResponse response = documentService.getLatestDocuments(kbId);
+            if (response.getCode() == 0 && response.getData() != null) {
+                @SuppressWarnings("unchecked")
+                List<com.xushu.rag.entity.Document> docs = (List<com.xushu.rag.entity.Document>) response.getData();
+                for (com.xushu.rag.entity.Document doc : docs) {
+                    java.util.Map<String, Object> docInfo = new java.util.HashMap<>();
+                    docInfo.put("id", doc.getId());
+                    docInfo.put("fileName", doc.getOriginalName());
+                    docInfo.put("version", doc.getVersion());
+                    docInfo.put("kbId", doc.getKbId());
+                    docInfo.put("fileType", doc.getFileType());
+                    allDocs.add(docInfo);
+                }
+            }
+        }
+        return ResultUtils.success(allDocs);
+    }
+
     private Path saveTempFile(MultipartFile file) throws IOException {
         String tempDir = System.getProperty("java.io.tmpdir");
         String originalFilename = file.getOriginalFilename();
@@ -417,5 +616,116 @@ public class KnowledgeController {
             return "知识库";
         }
         return name.toString() + "知识库";
+    }
+
+    /**
+     * 异步处理图片：提取 → 多模态描述 → 向量化存储
+     * <p>不阻塞主上传流程，图片描述完成后自动可检索</p>
+     *
+     * @author Joseph
+     */
+    private void processImagesAsync(String filePath, boolean isPdf, Long kbId, String kbName,
+                                     String version, String ossUrl, String originalFilename) {
+        try {
+            // 1. 提取图片（PDF/DOCX分别处理）
+            List<ImageExtractor.ExtractedImage> images;
+            if (isPdf) {
+                images = imageExtractor.extractImages(filePath);
+            } else {
+                images = imageExtractor.extractImagesFromDocx(filePath);
+            }
+            if (images.isEmpty()) {
+                log.info("文档无图片可处理: {}", originalFilename);
+                return;
+            }
+
+            log.info("开始异步处理{}张图片: {}", images.size(), originalFilename);
+
+            for (ImageExtractor.ExtractedImage image : images) {
+                String imageOssUrl = null;
+                try {
+                    // 2. 上传图片到OSS（前端渲染需要HTTP URL，文件名去空格避免Markdown解析失败）
+                    byte[] imageBytes = Files.readAllBytes(Paths.get(image.getPath()));
+                    String safeFileName = (originalFilename + "_" + image.getName())
+                            .replace(" ", "_").replace("(", "_").replace(")", "_");
+                    String imageOssName = "images/" + kbId + "/" + safeFileName;
+                    imageOssUrl = aliOssUtil.upload(imageBytes, imageOssName);
+                    log.debug("图片已上传OSS: {}", imageOssUrl);
+                } catch (Exception e) {
+                    log.warn("图片上传OSS失败，将仅保存本地路径: {}", e.getMessage());
+                }
+
+                try {
+                    // 3. 多模态描述
+                    String description = imageDescriber.describeImage(image.getPath());
+                    if (description == null || description.isEmpty()) {
+                        log.warn("图片描述为空，跳过: {}", image.getName());
+                        continue;
+                    }
+
+                    // 4. 向量化存储（含OSS URL）
+                    Map<String, Object> metadata = new HashMap<>();
+                    metadata.put("source", originalFilename);
+                    metadata.put("kb_id", kbId);
+                    metadata.put("kb_name", kbName);
+                    metadata.put("version", version);
+                    metadata.put("page", image.getPageNumber());
+                    metadata.put("chunk_type", "IMAGE");
+                    metadata.put("image_path", image.getPath());
+                    if (imageOssUrl != null) {
+                        metadata.put("image_url", imageOssUrl);
+                    }
+                    metadata.put("image_width", image.getWidth());
+                    metadata.put("image_height", image.getHeight());
+                    metadata.put("parent_page_text", description);
+
+                    org.springframework.ai.document.Document aiDoc =
+                            new org.springframework.ai.document.Document(description, metadata);
+                    vectorStore.add(java.util.Collections.singletonList(aiDoc));
+
+                    log.info("图片处理完成并向量化: {}, page={}", image.getName(), image.getPageNumber());
+
+                } catch (Exception e) {
+                    log.warn("图片处理失败: {}, error={}", image.getName(), e.getMessage());
+                } finally {
+                    // 清理临时图片文件
+                    try {
+                        Files.deleteIfExists(Paths.get(image.getPath()));
+                    } catch (IOException ignored) {
+                    }
+                }
+            }
+
+            log.info("图片异步处理全部完成: {}", originalFilename);
+
+        } catch (Exception e) {
+            log.error("图片异步处理异常: {}", originalFilename, e);
+        }
+    }
+
+    /**
+     * 解析结果封装内部类
+     * <p>
+     * 用于在文档解析流程中统一传递解析结果，避免方法签名过长。
+     * </p>
+     *
+     * @author Joseph
+     */
+    private static class ParsedContent {
+        private final JSONObject parseResult;
+        private final String contentText;
+
+        ParsedContent(JSONObject parseResult, String contentText) {
+            this.parseResult = parseResult;
+            this.contentText = contentText;
+        }
+
+        JSONObject getParseResult() {
+            return parseResult;
+        }
+
+        String getContentText() {
+            return contentText;
+        }
     }
 }
