@@ -24,6 +24,7 @@ import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 
@@ -64,6 +65,13 @@ public class AiRagController {
     private DocumentPageService documentPageService;
 
     private ChatModel chatModel;
+    private final ChatMemory chatMemory;
+
+    @Autowired
+    private RedisTemplate<String, String> redisTemplate;
+
+    /** Redis key前缀：用户检索指纹 */
+    private static final String FINGERPRINT_KEY_PREFIX = "rag:kb_fingerprint:";
 
     private static final String DEFAULT_SYSTEM_PROMPT = """
             你是"Joseph.zhou"知识库系统的对话助手，请以乐于助人的方式进行对话，
@@ -75,6 +83,7 @@ public class AiRagController {
                            VectorStore vectorStore,
                            RagTool ragTool) {
         this.chatModel = chatModel;
+        this.chatMemory = chatMemory;
         this.chatClient = ChatClient.builder(chatModel)
                 .defaultSystem(DEFAULT_SYSTEM_PROMPT)
                 .defaultSystem(p -> p.param("rag_message", ""))
@@ -110,7 +119,8 @@ public class AiRagController {
             @RequestParam(value = "message", defaultValue = "你好") String message,
             @RequestParam(value = "kbId", required = false) Long kbId,
             @RequestParam(value = "kbIds", required = false) List<Long> kbIds,
-            @RequestParam(value = "sources", required = false) List<String> sources) {
+            @RequestParam(value = "sources", required = false) List<String> sources,
+            @RequestParam(value = "sessionId", required = false, defaultValue = "default") String sessionId) {
 
         for (SensitiveWord sensitiveWord : sensitiveWordService.list()) {
             if (message.contains(sensitiveWord.getWord())) {
@@ -128,7 +138,7 @@ public class AiRagController {
 
         Long effectiveKbId = targetKbIds.isEmpty() ? null : targetKbIds.get(0);
 
-        return processKbRagQuery(sources, message, targetKbIds, effectiveKbId);
+        return processKbRagQuery(sources, message, targetKbIds, effectiveKbId, sessionId);
     }
 
     private Flux<String> processNormalRagQuery(List<String> sources, String message, Long kbId) {
@@ -166,8 +176,20 @@ public class AiRagController {
         return clientRequestSpec.stream().content();
     }
 
-    private Flux<String> processKbRagQuery(List<String> sources, String message, List<Long> kbIds, Long effectiveKbId) {
+    private Flux<String> processKbRagQuery(List<String> sources, String message, List<Long> kbIds,
+                                            Long effectiveKbId, String sessionId) {
         Long userId = BaseContext.getCurrentId();
+        String conversationId = userId + "_" + sessionId;
+
+        // 检测检索范围是否变化（Redis存储，多实例+多标签页共享），变化则自动清除记忆
+        String currentFingerprint = (kbIds != null ? kbIds.toString() : "all")
+                + "|" + (sources != null ? sources.toString() : "all");
+        String redisKey = FINGERPRINT_KEY_PREFIX + conversationId;
+        String previousFingerprint = redisTemplate.opsForValue().getAndSet(redisKey, currentFingerprint);
+        if (previousFingerprint != null && !previousFingerprint.equals(currentFingerprint)) {
+            chatMemory.clear(conversationId);
+            log.info("[记忆清除] conversationId={}, 检索范围变化: {} → {}", conversationId, previousFingerprint, currentFingerprint);
+        }
 
         boolean hasFilter = (kbIds != null && !kbIds.isEmpty()) || (sources != null && !sources.isEmpty());
         String ragMessage = buildRagMessageWithTemplate(effectiveKbId, message, hasFilter);
@@ -177,7 +199,7 @@ public class AiRagController {
                 .system(a -> a.param("current_data", LocalDate.now().toString()))
                 .system(a -> a.param("rag_message", ragMessage))
                 .advisors(a -> a.param("userMessage", message))
-                .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, userId)
+                .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, conversationId)
                         .param("chat_memory_response_size", 16));
 
         SearchRequest.Builder searchRequestBuilder = SearchRequest.builder()
@@ -188,14 +210,12 @@ public class AiRagController {
         StringBuilder filterExpr = new StringBuilder();
         List<String> filterParts = new ArrayList<>();
 
-        if (kbIds != null && !kbIds.isEmpty()) {
-            String kbFilter = "kb_id in " + JSON.toJSONString(kbIds);
-            filterParts.add(kbFilter);
-        }
-
+        // 选了文件：只用文件过滤（文件自带KB归属，避免KB条件误杀空库）
         if (sources != null && !sources.isEmpty()) {
-            String sourceFilter = "source in " + JSON.toJSONString(sources);
-            filterParts.add(sourceFilter);
+            filterParts.add("source in " + JSON.toJSONString(sources));
+        } else if (kbIds != null && !kbIds.isEmpty()) {
+            // 没选文件但选了知识库：用KB过滤
+            filterParts.add("kb_id in " + JSON.toJSONString(kbIds));
         }
 
         log.info("[检索过滤] kbIds={}, sources={}, filterExpr={}",
