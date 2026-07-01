@@ -44,21 +44,43 @@ public class LLMGenerateNode {
         String question = (String) state.getOrDefault(StateKeys.QUESTION, "");
         String conversationId = (String) state.getOrDefault(StateKeys.CONVERSATION_ID, "default");
 
-        // 替换 {context} 占位符
-        String finalSystem = systemPrompt.replace("{context}", context);
+        // 系统提示词中不再注入文档上下文，替换 {context} 为空
+        // 文档上下文改为注入到用户消息中（对标 MetadataAwareQuestionAnswerAdvisor 格式），
+        // 提升LLM对检索结果的关注度，避免系统提示词过长导致LLM忽略上下文
+        String finalSystem = systemPrompt.replace("{context}", "");
 
         // 无检索结果时加入提示
         if ("知识库中暂无相关内容".equals(context)) {
             finalSystem += "\n知识库中暂无相关内容，请如实告知用户，不要编造信息。";
         }
 
-        log.info("[LLMGenerate] 开始生成, conversationId={}, systemPrompt={}字, context={}字",
-                conversationId, finalSystem.length(), context.length());
+        // 构建用户消息：将上下文包裹在用户问题之后（核心修复）
+        // 参照 Spring AI QuestionAnswerAdvisor 的标准格式，
+        // 让上下文与用户问题紧密关联，LLM无法忽略
+        String augmentedUser;
+        if (context != null && !context.isEmpty()
+                && !"知识库中暂无相关内容".equals(context)) {
+            augmentedUser = question + "\n\n" +
+                    "Context information is below, surrounded by ---------------------\n" +
+                    "\n" +
+                    "---------------------\n" +
+                    context + "\n" +
+                    "---------------------\n" +
+                    "\n" +
+                    "Given the context and provided history information and not prior knowledge, " +
+                    "reply to the user comment. If the answer is not in the context, inform " +
+                    "the user that you can't answer the question.";
+        } else {
+            augmentedUser = question;
+        }
+
+        log.info("[LLMGenerate] 开始生成, conversationId={}, systemPrompt={}字, context={}字, userMsg={}字",
+                conversationId, finalSystem.length(), context.length(), augmentedUser.length());
 
         try {
             String answer = chatClient.prompt()
                     .system(finalSystem)
-                    .user(question)
+                    .user(augmentedUser)
                     .advisors(a -> a
                             .param(ChatMemory.CONVERSATION_ID, conversationId)
                             .param("chat_memory_response_size", CHAT_MEMORY_RESPONSE_SIZE))

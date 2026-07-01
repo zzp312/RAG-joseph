@@ -34,8 +34,10 @@ public class Qwen3RerankStrategy implements IRerankStrategy {
     private static final double MIN_SCORE = 0.3;
     /** 最终保留的最大页面数 */
     private static final int MAX_RESULTS = 8;
-    /** 每页截断字符数（API限制4000Token≈3000中文字符，留余量） */
-    private static final int PAGE_TRUNCATE_CHARS = 2500;
+    /** 每页截断字符数（API限制30720总输入，按最多20页留余量：30720/20≈1500） */
+    private static final int PAGE_TRUNCATE_CHARS = 1500;
+    /** API 总输入上限 */
+    private static final int API_MAX_TOTAL_CHARS = 30720;
 
     @Value("${spring.ai.dashscope.api-key}")
     private String apiKey;
@@ -65,12 +67,17 @@ public class Qwen3RerankStrategy implements IRerankStrategy {
 
         long startTime = System.currentTimeMillis();
 
-        // 构建请求：截断每页文本到2500字以内
+        // 构建请求：动态截断（根据文档数分配额度，避免硬截断浪费额度）
+        int maxPerDoc = Math.min(PAGE_TRUNCATE_CHARS, API_MAX_TOTAL_CHARS / Math.max(1, documents.size()));
+        log.debug("[Qwen3Rerank] 动态截断: {}篇文档, 每篇上限{}字", documents.size(), maxPerDoc);
         List<String> docTexts = documents.stream()
                 .map(d -> {
                     String text = d.getText();
-                    return text.length() > PAGE_TRUNCATE_CHARS
-                            ? text.substring(0, PAGE_TRUNCATE_CHARS)
+                    if (text == null || text.isBlank()) {
+                        return "-"; // 占位，避免空文本导致API报错
+                    }
+                    return text.length() > maxPerDoc
+                            ? text.substring(0, maxPerDoc)
                             : text;
                 })
                 .collect(Collectors.toList());

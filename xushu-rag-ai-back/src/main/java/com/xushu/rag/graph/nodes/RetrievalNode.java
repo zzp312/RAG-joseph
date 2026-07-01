@@ -14,8 +14,9 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * 向量检索Node（复用现有Small-to-Big回表逻辑）
- * <p>调用Milvus检索 → 去重回表DocumentPageService → 构建父页面文档列表</p>
+ * 向量检索Node（完全对标旧版 AiRagController.processKbRagQuery 检索链路）
+ * <p>Milvus检索(topK=10) → VersionFirst排序 → Small-to-Big回表 → 二次检索原始chunk</p>
+ * <p>不做额外Rerank、不做特殊IMAGE/TABLE处理，与旧版保持完全一致的召回粒度</p>
  *
  * @author Joseph
  */
@@ -23,24 +24,24 @@ import java.util.stream.Collectors;
 @Component
 public class RetrievalNode {
 
-    /** 有filter时的默认topK（搜索空间已缩窄） */
-    private static final int TOP_K_FILTERED = 10;
-    /** 无filter时的粗召回topK（搜索空间大，需更多候选供Rerank筛选） */
-    private static final int TOP_K_UNFILTERED = 30;
+    /** 一阶段粗召回 topK（有 Qwen3Rerank 精排兜底，可放宽门槛捕获更多候选） */
+    private static final int TOP_K = 20;
 
     private final VectorStore vectorStore;
     private final DocumentPageService documentPageService;
-    /** 主Rerank：qwen3-rerank专用模型（快速、准确） */
+    private final IRerankStrategy versionFirstRerank;
+    /** 保留注入（暂不使用，待P1/P2恢复语义Rerank） */
     private final IRerankStrategy primaryRerank;
-    /** 降级兜底：LLM Rerank（当专用模型API不可用时） */
     private final IRerankStrategy fallbackRerank;
 
     public RetrievalNode(VectorStore vectorStore,
                          DocumentPageService documentPageService,
+                         @Qualifier("versionFirstRerankStrategy") IRerankStrategy versionFirstRerank,
                          @Qualifier("qwen3RerankStrategy") IRerankStrategy primaryRerank,
                          @Qualifier("llmRerankStrategy") IRerankStrategy fallbackRerank) {
         this.vectorStore = vectorStore;
         this.documentPageService = documentPageService;
+        this.versionFirstRerank = versionFirstRerank;
         this.primaryRerank = primaryRerank;
         this.fallbackRerank = fallbackRerank;
     }
@@ -51,14 +52,13 @@ public class RetrievalNode {
         @SuppressWarnings("unchecked")
         List<String> sources = (List<String>) state.getOrDefault(StateKeys.SOURCES, null);
 
-        // 诊断：打印State中所有key确认参数完整性
         log.info("[Retrieval-Diag] stateKeys={}, question={}",
                 state.keySet(),
-                ((String) state.getOrDefault(StateKeys.QUESTION, "")).length() > 30 
-                    ? ((String) state.get(StateKeys.QUESTION)).substring(0, 30) + "..." 
+                ((String) state.getOrDefault(StateKeys.QUESTION, "")).length() > 30
+                    ? ((String) state.get(StateKeys.QUESTION)).substring(0, 30) + "..."
                     : state.get(StateKeys.QUESTION));
 
-        // 构建过滤条件
+        // 构建过滤条件（与旧版 AiRagController 完全一致）
         List<String> filterParts = new ArrayList<>();
         if (sources != null && !sources.isEmpty()) {
             filterParts.add("source in " + com.alibaba.fastjson.JSON.toJSONString(sources));
@@ -69,12 +69,12 @@ public class RetrievalNode {
         String filterExpr = filterParts.isEmpty() ? "无过滤(全文件)" : String.join(" && ", filterParts);
         log.info("[Retrieval] kbIds={}, sources={}, filter={}", kbIds, sources, filterExpr);
 
-        // 无filter时粗召回更多候选(topK=30），交给Rerank精排
-        // 有filter时搜索空间已缩窄，topK=10足矣
-        boolean hasFilter = !filterParts.isEmpty();
-        int topK = hasFilter ? TOP_K_FILTERED : TOP_K_UNFILTERED;
+        String question = (String) state.getOrDefault(StateKeys.QUESTION, "");
+
+        // ① Milvus检索：topK=10, threshold=0.1, query=question（完全对标旧版）
         SearchRequest.Builder builder = SearchRequest.builder()
-                .topK(topK)
+                .query(question)
+                .topK(TOP_K)
                 .similarityThreshold(0.1);
 
         if (!filterParts.isEmpty()) {
@@ -85,87 +85,9 @@ public class RetrievalNode {
         try {
             retrievedDocs = vectorStore.similaritySearch(builder.build());
         } catch (Exception e) {
-            log.error("[Retrieval] 向量检索失败: {}", e.getMessage());
+            log.error("[Retrieval] ①Milvus检索失败: {}", e.getMessage());
         }
-
-        // 图片chunk诊断统计
-        long imageChunkCount = retrievedDocs.stream()
-                .filter(d -> "IMAGE".equalsIgnoreCase(
-                        Objects.toString(d.getMetadata().get("chunk_type"), "")))
-                .count();
-        log.info("[Retrieval] 召回{}个chunk, 其中IMAGE类型{}个", retrievedDocs.size(), imageChunkCount);
-
-        // 兜底：主检索未召回图片时，做一次独立的图片补充检索
-        // 原因：图片描述文本向量相似度通常低于正文，topK=10时容易被挤掉
-        if (imageChunkCount == 0 && !filterParts.isEmpty()) {
-            List<Document> imageDocs = Collections.emptyList();
-            
-            // 方法1：尝试带 chunk_type 过滤的精确检索
-            try {
-                String imageFilter = String.join(" && ", filterParts)
-                        + " && chunk_type == \"IMAGE\"";
-                SearchRequest imageRequest = SearchRequest.builder()
-                        .topK(10)
-                        .similarityThreshold(0.01)
-                        .filterExpression(imageFilter)
-                        .build();
-                imageDocs = vectorStore.similaritySearch(imageRequest);
-            } catch (Exception e) {
-                log.warn("[Retrieval-IMG] chunk_type过滤检索失败: {}", e.getMessage());
-            }
-
-            // 方法2：若精确过滤失败，用宽口径检索后Java侧过滤（兼容Milvus filter语法差异）
-            if (imageDocs.isEmpty()) {
-                try {
-                    SearchRequest broadRequest = SearchRequest.builder()
-                            .topK(30)
-                            .similarityThreshold(0.01)
-                            .filterExpression(String.join(" && ", filterParts))
-                            .build();
-                    List<Document> broadDocs = vectorStore.similaritySearch(broadRequest);
-                    imageDocs = broadDocs.stream()
-                            .filter(d -> "IMAGE".equalsIgnoreCase(
-                                    Objects.toString(d.getMetadata().get("chunk_type"), "")))
-                            .limit(5)
-                            .collect(Collectors.toList());
-                } catch (Exception e) {
-                    log.warn("[Retrieval-IMG] 宽口径检索也失败: {}", e.getMessage());
-                }
-            }
-
-            if (!imageDocs.isEmpty()) {
-                retrievedDocs = new ArrayList<>(retrievedDocs);
-                retrievedDocs.addAll(imageDocs);
-                log.info("[Retrieval-IMG] 补充检索到{}个图片chunk，合并后共{}个chunk",
-                        imageDocs.size(), retrievedDocs.size());
-            } else {
-                log.info("[Retrieval-IMG] 补充检索未找到图片chunk（可能该知识库无图片文件）");
-            }
-        }
-
-        // 诊断：如果带filter召回为0，尝试不带filter检索，判断是阈值还是filter导致
-        if (retrievedDocs.isEmpty() && !filterParts.isEmpty()) {
-            try {
-                SearchRequest noFilterRequest = SearchRequest.builder()
-                        .topK(5)
-                        .similarityThreshold(0.1)
-                        .build();
-                List<Document> noFilterDocs = vectorStore.similaritySearch(noFilterRequest);
-                log.warn("[Retrieval-Diag] 带filter召回0个，不带filter召回{}个 → filter表达式'{}'可能不匹配Milvus中实际数据",
-                        noFilterDocs.size(), filterExpr);
-                if (!noFilterDocs.isEmpty()) {
-                    // 打印前3条的metadata字段，帮助排查filter字段名/类型问题
-                    for (int i = 0; i < Math.min(3, noFilterDocs.size()); i++) {
-                        log.warn("[Retrieval-Diag] chunk#{} metadata keys={}, kb_id={}, source={}",
-                                i, noFilterDocs.get(i).getMetadata().keySet(),
-                                noFilterDocs.get(i).getMetadata().get("kb_id"),
-                                noFilterDocs.get(i).getMetadata().get("source"));
-                    }
-                }
-            } catch (Exception e) {
-                log.warn("[Retrieval-Diag] 无filter检索也失败: {}", e.getMessage());
-            }
-        }
+        log.info("[Retrieval] ①Milvus检索 → {}个chunk", retrievedDocs.size());
 
         if (retrievedDocs.isEmpty()) {
             return Map.of(
@@ -174,67 +96,93 @@ public class RetrievalNode {
             );
         }
 
-        // Small-to-Big: chunk → 父页面回表
-        List<Document> parentDocs = mapToParentPages(retrievedDocs);
+        // 留存原始chunk副本（Small-to-Big后需要回补，含IMAGE描述等非TEXT内容）
+        List<Document> rawChunks = new ArrayList<>(retrievedDocs);
 
-        log.info("[Retrieval] Small-to-Big: {}个chunk → {}个父页面",
-                retrievedDocs.size(), parentDocs.size());
+        // ② VersionFirst排序（对标旧版 rerankStrategy.rerank()，不筛不丢，只排序）
+        Map<String, Object> versionFirstCtx = new HashMap<>();
+        versionFirstCtx.put("query", question);
+        versionFirstCtx.put("kbIds", kbIds);
+        List<Document> rankedDocs = versionFirstRerank.rerank(retrievedDocs, versionFirstCtx);
+        log.info("[Retrieval] ②VersionFirst → {}个chunk（不过滤）", rankedDocs.size());
 
-        // Rerank：无filter时做语义精排，筛掉向量假相关的文档
-        if (!hasFilter && parentDocs.size() > 8) {
-            String question = (String) state.getOrDefault(StateKeys.QUESTION, "");
+        // ③ Small-to-Big: chunk → 父页面回表（对标旧版 mapToParentPages）
+        List<Document> parentDocs = mapToParentPages(rankedDocs);
+        log.info("[Retrieval] ③Small-to-Big: {}chunk→{}父页面", rankedDocs.size(), parentDocs.size());
+
+        // ④ 合并：父页面 + 留存原始chunk去重（回补IMAGE/TABLE等Small-to-Big丢失的内容）
+        List<Document> merged = new ArrayList<>(parentDocs);
+        Set<String> seenTexts = parentDocs.stream()
+                .map(Document::getText)
+                .collect(Collectors.toSet());
+        for (Document raw : rawChunks) {
+            if (seenTexts.add(raw.getText())) {
+                merged.add(raw);
+            }
+        }
+        log.info("[Retrieval] ④合并: 父页面{} + 原始chunk = 共{}个", parentDocs.size(), merged.size());
+
+        // ⑤ Qwen3Rerank 语义精排 — 全量文档参与打分（含IMAGE/TABLE）
+        if (merged.size() > 8) {
             Map<String, Object> rerankCtx = new HashMap<>();
             rerankCtx.put("query", question);
             rerankCtx.put("kbIds", kbIds);
-
-            log.info("[Retrieval-Rerank] 无filter触发Rerank, 候选{}个页面", parentDocs.size());
-            List<Document> rerankedDocs = null;
-
-            // 优先使用 qwen3-rerank 专用模型（快、准、省）
-            try {
-                rerankedDocs = primaryRerank.rerank(parentDocs, rerankCtx);
-            } catch (Exception e) {
-                log.warn("[Retrieval-Rerank] qwen3-rerank失败，降级LLM Rerank: {}", e.getMessage());
-            }
-
-            // 降级：只有当 qwen3-rerank 完全失败（异常或0结果）时才走 LLM Rerank
-            if (rerankedDocs == null || rerankedDocs.isEmpty()) {
-                log.warn("[Retrieval-Rerank] qwen3-rerank返回空，降级LLM Rerank");
-                try {
-                    rerankedDocs = fallbackRerank.rerank(parentDocs, rerankCtx);
-                } catch (Exception e) {
-                    log.error("[Retrieval-Rerank] LLM Rerank也失败: {}", e.getMessage());
-                }
-            }
-
-            // 救援机制：两层都失败或返回太少，用原始top 8兜底
-            if (rerankedDocs == null || rerankedDocs.size() < 3) {
-                log.warn("[Retrieval-Rerank] 两层Rerank均过滤过激(仅{}条)，降级原始top 8",
-                        rerankedDocs == null ? 0 : rerankedDocs.size());
-                parentDocs = parentDocs.subList(0, Math.min(8, parentDocs.size()));
-            } else {
-                parentDocs = rerankedDocs;
-            }
-            log.info("[Retrieval-Rerank] 最终保留{}个页面", parentDocs.size());
+            log.info("[Retrieval] ⑤Qwen3Rerank 触发, 候选{}个文档", merged.size());
+            merged = rerankWithFallback(merged, rerankCtx);
+            log.info("[Retrieval] ⑤Rerank完成 → {}个文档", merged.size());
         }
 
+        long finalImgCount = merged.stream()
+                .filter(d -> "IMAGE".equalsIgnoreCase(
+                        Objects.toString(d.getMetadata().get("chunk_type"), "")))
+                .count();
+        long finalTblCount = merged.stream()
+                .filter(d -> "TABLE".equalsIgnoreCase(
+                        Objects.toString(d.getMetadata().get("chunk_type"), "")))
+                .count();
+        log.info("[Retrieval] 最终输出: {}个页面, IMAGE={}个, TABLE={}个",
+                merged.size(), finalImgCount, finalTblCount);
+
         return Map.of(
-                StateKeys.DOCUMENTS, parentDocs,
-                StateKeys.STEPS, "检索完成: 命中" + parentDocs.size() + "个相关页面"
+                StateKeys.DOCUMENTS, merged,
+                StateKeys.STEPS, "检索完成: 命中" + merged.size() + "个相关页面"
         );
     }
 
     /**
+     * Rerank + LLM降级 + 救援机制（标准三层容灾）
+     */
+    private List<Document> rerankWithFallback(List<Document> docs, Map<String, Object> ctx) {
+        List<Document> result = null;
+        try {
+            result = primaryRerank.rerank(docs, ctx);
+        } catch (Exception e) {
+            log.warn("[Rerank] Qwen3Rerank失败, 降级LLM: {}", e.getMessage());
+        }
+        if (result == null || result.isEmpty()) {
+            try {
+                result = fallbackRerank.rerank(docs, ctx);
+            } catch (Exception e) {
+                log.error("[Rerank] LLM降级也失败: {}", e.getMessage());
+            }
+        }
+        if (result == null || result.size() < 3) {
+            log.warn("[Rerank] 两层均过滤过激(仅{}条), 降级原始top8",
+                    result == null ? 0 : result.size());
+            return docs.subList(0, Math.min(8, docs.size()));
+        }
+        return result;
+    }
+
+    /**
      * Small-to-Big: chunk页面指针 → MySQL回表查原文
-     * <p>复刻 RAG-Challenge-2 的 return_parent_pages 模式</p>
-     * <p>修复：IMAGE/TABLE等非TEXT类型的chunk，其页面不在document_pages表中，
-     * 不应被静默丢弃，而应保留原始chunk内容（图片描述、表格文本等）</p>
+     * <p>完全对标旧版 AiRagController.mapToParentPages()，不做特殊IMAGE/TABLE处理</p>
+     *
+     * @author Joseph
      */
     private List<Document> mapToParentPages(List<Document> chunks) {
+        // 1. 收集所有(source+version, page)组合
         Map<String, List<Integer>> svPagesMap = new LinkedHashMap<>();
-        // 记录已成功回表的(source, page)组合，用于后续判断哪些chunk需要兜底保留
-        Set<String> resolvedPageKeys = new HashSet<>();
-
         for (Document chunk : chunks) {
             Object sourceObj = chunk.getMetadata().get("source");
             Object versionObj = chunk.getMetadata().get("version");
@@ -247,6 +195,7 @@ public class RetrievalNode {
             svPagesMap.computeIfAbsent(svKey, k -> new ArrayList<>()).add(page);
         }
 
+        // 2. 按(source,version)回表MySQL查原文
         Map<String, Document> pageMap = new LinkedHashMap<>();
         for (Map.Entry<String, List<Integer>> entry : svPagesMap.entrySet()) {
             String[] parts = entry.getKey().split("\\|", 2);
@@ -262,49 +211,36 @@ public class RetrievalNode {
                 String fullText = pageTexts.get(key);
                 if (fullText == null || fullText.isEmpty()) continue;
 
-                resolvedPageKeys.add(key);
-
-                Map<String, Object> meta = new HashMap<>();
-                meta.put("source", source);
-                meta.put("page", pn);
-                meta.put("version", version);
-                meta.put("chunk_type", "PARENT_PAGE");
+                Map<String, Object> pageMeta = new HashMap<>();
+                pageMeta.put("source", source);
+                pageMeta.put("page", pn);
+                pageMeta.put("version", version);
+                pageMeta.put("chunk_type", "PARENT_PAGE");
                 for (Document chunk : chunks) {
                     if (source.equals(chunk.getMetadata().get("source"))
                             && pn.equals(chunk.getMetadata().get("page"))) {
                         if (chunk.getMetadata().get("kb_id") != null)
-                            meta.put("kb_id", chunk.getMetadata().get("kb_id"));
+                            pageMeta.put("kb_id", chunk.getMetadata().get("kb_id"));
                         if (chunk.getMetadata().get("kb_name") != null)
-                            meta.put("kb_name", chunk.getMetadata().get("kb_name"));
+                            pageMeta.put("kb_name", chunk.getMetadata().get("kb_name"));
                         break;
                     }
                 }
-
-                pageMap.put(key, new Document(truncatePageText(fullText), meta));
+                pageMap.put(key, new Document(truncateText(fullText), pageMeta));
             }
         }
 
-        // 兜底：保留所有未被回表的原始chunk（IMAGE/TABLE类型在document_pages中无记录，不应丢弃）
+        // 3. 无页码的chunk直接保留（对标旧版最后一步）
         for (Document chunk : chunks) {
-            Object pageObj = chunk.getMetadata().get("page");
-            Object sourceObj = chunk.getMetadata().get("source");
-            if (pageObj == null) {
-                // 无页码的chunk直接保留
+            if (chunk.getMetadata().get("page") == null) {
                 pageMap.putIfAbsent("nopage_" + chunk.hashCode(), chunk);
-            } else if (sourceObj != null) {
-                // 有页码但未能回表的chunk（如IMAGE/TABLE）：保留原始内容
-                String key = sourceObj + "_" + pageObj;
-                if (!resolvedPageKeys.contains(key)) {
-                    String fallbackKey = "raw_" + sourceObj + "_" + pageObj + "_" + chunk.hashCode();
-                    pageMap.putIfAbsent(fallbackKey, chunk);
-                }
             }
         }
 
         return new ArrayList<>(pageMap.values());
     }
 
-    private String truncatePageText(String text) {
+    private String truncateText(String text) {
         final int MAX = 8000;
         if (text == null || text.length() <= MAX) return text != null ? text : "";
         String truncated = text.substring(0, MAX);
