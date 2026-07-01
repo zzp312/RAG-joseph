@@ -7,6 +7,7 @@ import com.xushu.rag.common.ApplicationConstant;
 import com.xushu.rag.context.BaseContext;
 import com.xushu.rag.graph.RagGraphAgent;
 import com.xushu.rag.graph.StateKeys;
+import com.xushu.rag.graph.nodes.HybridSearchTestNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -14,6 +15,7 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.util.*;
 
@@ -32,9 +34,19 @@ public class GraphChatController {
     private final RagGraphAgent ragGraphAgent;
     private final RedisTemplate<String, String> redisTemplate;
     private final ChatMemory chatMemory;
+    private final HybridSearchTestNode hybridSearchTestNode;
 
     /** Redis key前缀：用户检索指纹 */
     private static final String FINGERPRINT_KEY_PREFIX = "rag:kb_fingerprint:";
+
+    /** Milvus BM25 混合检索兼容性检测 */
+    @PostMapping(value = "/bm25-test", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Mono<String> bm25Test() {
+        return Mono.fromCallable(() -> {
+            Map<String, Object> result = hybridSearchTestNode.apply(new HashMap<>());
+            return (String) result.getOrDefault("answer", "{}");
+        });
+    }
 
     /**
      * Graph Agent RAG问答（SSE流式）

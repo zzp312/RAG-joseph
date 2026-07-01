@@ -67,6 +67,9 @@ public final class StateKeys {
     /** 累计Token使用（各Node自行累加，用于预算校验） */
     public static final String TOKEN_USAGE = "tokenUsage";
 
+    /** 拆解后的子问题列表（QueryDecomposeNode 产出） */
+    public static final String SUB_QUERIES = "subQueries";
+
     /** SSE步骤类型常量 */
     public static final class StepType {
         /** 思考中（意图分类、生成中） */

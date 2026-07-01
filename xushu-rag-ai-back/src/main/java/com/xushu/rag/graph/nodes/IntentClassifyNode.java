@@ -45,6 +45,17 @@ public class IntentClassifyNode {
         }
 
         String category = result.getCategory().getValue();
+
+        // 覆写：检测对比/聚合语义（QueryDecomposeNode 触发条件）
+        String q = question.toLowerCase();
+        if (q.contains("区别") || q.contains("对比") || q.contains("比较") || q.contains("哪个更好")
+                || q.contains("优缺点") || q.contains("异同") || q.contains("差异")) {
+            category = "comparison";
+        } else if (q.contains("汇总") || q.contains("统计") || q.contains("最多") || q.contains("最少")
+                || q.contains("列出所有") || q.contains("有哪些")) {
+            category = "aggregation";
+        }
+
         log.info("[IntentClassify] question='{}', category={}, layer={}, tokenUsed={}",
                 question.length() > 40 ? question.substring(0, 40) + "..." : question,
                 category, result.getLayer(), result.getTokenUsed());

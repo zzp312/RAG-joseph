@@ -37,8 +37,8 @@ public class ContextBuildNode {
                 .anyMatch(d -> "IMAGE".equalsIgnoreCase(
                         Objects.toString(d.getMetadata().get("chunk_type"), "")));
         if (hasImages) {
-            context.append("【注意】以下内容包含图片及其URL，图片均存储在OSS可直接访问，")
-                    .append("回答时请使用Markdown语法 ![描述](URL) 展示图片，不要声称图片无法显示。\n\n");
+            context.append("【强制要求】以下上下文包含图片，每张图片标注了【必须展示此图片】，")
+                    .append("你必须将每张图片的Markdown语法原样输出到回答中，不得遗漏任何一张。\n\n");
         }
 
         for (Document doc : documents) {
@@ -76,8 +76,8 @@ public class ContextBuildNode {
                             ? imgText.substring(0, 30).replace("\n", " ") + "..."
                             : imgText.replace("\n", " ");
                     context.append("\n图片内容描述：").append(imgText);
-                    context.append("\n（请直接复制以下Markdown到回答中展示该图片：![")
-                            .append(altText).append("](").append(safeUrl).append(")）");
+                    context.append("\n【必须展示此图片】将以下Markdown原样输出到回答中：![")
+                            .append(altText).append("](").append(safeUrl).append(")");
                 } else {
                     context.append("\n").append(imgText);
                 }

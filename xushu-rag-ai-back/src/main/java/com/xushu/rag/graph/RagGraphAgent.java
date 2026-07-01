@@ -41,6 +41,7 @@ public class RagGraphAgent {
     private final RetrievalNode retrievalNode;
     private final ContextBuildNode contextBuildNode;
     private final LLMGenerateNode llmGenerateNode;
+    private final QueryDecomposeNode queryDecomposeNode;
     private final ChatModel chatModel;
 
     public RagGraphAgent(QuestionInputNode questionInputNode,
@@ -49,6 +50,7 @@ public class RagGraphAgent {
                          RetrievalNode retrievalNode,
                          ContextBuildNode contextBuildNode,
                          LLMGenerateNode llmGenerateNode,
+                         QueryDecomposeNode queryDecomposeNode,
                          ChatModel chatModel) {
         this.questionInputNode = questionInputNode;
         this.intentClassifyNode = intentClassifyNode;
@@ -56,6 +58,7 @@ public class RagGraphAgent {
         this.retrievalNode = retrievalNode;
         this.contextBuildNode = contextBuildNode;
         this.llmGenerateNode = llmGenerateNode;
+        this.queryDecomposeNode = queryDecomposeNode;
         this.chatModel = chatModel;
     }
 
@@ -95,6 +98,7 @@ public class RagGraphAgent {
             StateKeys.KB_IDS, StateKeys.SOURCES, StateKeys.EFFECTIVE_KB_ID,
             StateKeys.CONVERSATION_ID, StateKeys.DOCUMENTS, StateKeys.CONTEXT,
             StateKeys.ANSWER, StateKeys.STEPS, StateKeys.STEP_TYPE,
+            StateKeys.SUB_QUERIES,
             StateKeys.EMOTION, StateKeys.ESCALATE, StateKeys.MCP_RESULT, StateKeys.TOKEN_USAGE
     };
 
@@ -102,17 +106,29 @@ public class RagGraphAgent {
     protected void registerNodes(StateGraph stateGraph) throws GraphStateException {
         addNode(stateGraph, "question_input", questionInputNode, StateKeys.StepType.THINKING);
         addNode(stateGraph, "intent_classify", intentClassifyNode, StateKeys.StepType.THINKING);
+        addNode(stateGraph, "query_decompose", queryDecomposeNode, StateKeys.StepType.THINKING);
         addNode(stateGraph, "prompt_route", promptRouteNode, StateKeys.StepType.THINKING);
         addNode(stateGraph, "retrieval", retrievalNode, StateKeys.StepType.TOOL);
         addNode(stateGraph, "context_build", contextBuildNode, StateKeys.StepType.THINKING);
         addNode(stateGraph, "llm_generate", llmGenerateNode, StateKeys.StepType.THINKING);
     }
 
-    /** 连接所有边（Phase 2在此改为条件边） */
+    /** 连接所有边（comparison/aggregation → query_decompose → prompt_route） */
     protected void wireEdges(StateGraph stateGraph) throws GraphStateException {
         stateGraph.addEdge(START, "question_input");
         stateGraph.addEdge("question_input", "intent_classify");
-        stateGraph.addEdge("intent_classify", "prompt_route");
+
+        // 条件边：comparison/aggregation 走拆解节点，其他直连 prompt_route
+        stateGraph.addConditionalEdges("intent_classify",
+                state -> java.util.concurrent.CompletableFuture.completedFuture(
+                        "comparison".equalsIgnoreCase(
+                                (String) state.data().getOrDefault(StateKeys.CATEGORY, ""))
+                        || "aggregation".equalsIgnoreCase(
+                                (String) state.data().getOrDefault(StateKeys.CATEGORY, ""))
+                                ? "query_decompose" : "prompt_route"),
+                Map.of("query_decompose", "query_decompose", "prompt_route", "prompt_route"));
+
+        stateGraph.addEdge("query_decompose", "prompt_route");
         stateGraph.addEdge("prompt_route", "retrieval");
         stateGraph.addEdge("retrieval", "context_build");
         stateGraph.addEdge("context_build", "llm_generate");
@@ -129,6 +145,7 @@ public class RagGraphAgent {
         else if (node instanceof RetrievalNode) fn = ((RetrievalNode) node)::apply;
         else if (node instanceof ContextBuildNode) fn = ((ContextBuildNode) node)::apply;
         else if (node instanceof LLMGenerateNode) fn = ((LLMGenerateNode) node)::apply;
+        else if (node instanceof QueryDecomposeNode) fn = ((QueryDecomposeNode) node)::apply;
         else throw new IllegalArgumentException("Unsupported node type: " + node.getClass());
 
         graph.addNode(name, (OverAllState state, RunnableConfig config) -> {

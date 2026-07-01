@@ -6,6 +6,7 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.PromptChatMemoryAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -24,6 +25,10 @@ public class LLMGenerateNode {
 
     /** 对话记忆保留消息数（5轮 = 10条消息） */
     private static final int CHAT_MEMORY_RESPONSE_SIZE = 10;
+
+    /** RAGAS 异步评估开关（默认关闭，开发调试时开启） */
+    @Value("${ragas.eval.enabled:false}")
+    private boolean ragasEvalEnabled;
 
     private final ChatClient chatClient;
     private final ChatMemory chatMemory;
@@ -49,9 +54,9 @@ public class LLMGenerateNode {
         // 提升LLM对检索结果的关注度，避免系统提示词过长导致LLM忽略上下文
         String finalSystem = systemPrompt.replace("{context}", "");
 
-        // 无检索结果时加入提示
+        // 无检索结果时：强指令覆盖系统提示词，禁止 LLM 使用自身知识
         if ("知识库中暂无相关内容".equals(context)) {
-            finalSystem += "\n知识库中暂无相关内容，请如实告知用户，不要编造信息。";
+            finalSystem = "【严格指令】知识库中没有找到与用户问题相关的任何内容。你MUST只回复'知识库中暂无相关内容'。禁止使用你自己的知识回答，禁止补充、解释、举例。只回复这10个字。";
         }
 
         // 构建用户消息：将上下文包裹在用户问题之后（核心修复）
@@ -91,7 +96,27 @@ public class LLMGenerateNode {
                 answer = "抱歉，暂时无法回答您的问题。";
             }
 
-            log.info("[LLMGenerate] 生成完成, answer={}字", answer.length());
+            // 澄清检测：LLM 在反问而非回答 → 强指令重新生成
+            if (isClarification(answer) && context != null && context.length() > 500) {
+                log.info("[LLMGenerate] 检测到澄清式回答，触发强指令重新生成");
+                String reAnswer = chatClient.prompt()
+                        .system("【强制指令】你是知识库助手，必须基于上下文完整回答用户问题。禁止反问、禁止要求用户澄清、禁止说'请问'。如果有多个条目，全部列出来。")
+                        .user(augmentedUser)
+                        .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, conversationId)
+                                .param("chat_memory_response_size", CHAT_MEMORY_RESPONSE_SIZE))
+                        .call()
+                        .content();
+                if (reAnswer != null && !reAnswer.trim().isEmpty() && !isClarification(reAnswer)) {
+                    answer = reAnswer;
+                    log.info("[LLMGenerate] 强指令重新生成成功, answer={}字", answer.length());
+                }
+            }
+
+            log.info("[LLMGenerate] 生成完成, answer={}字, question={}", answer.length(),
+                    question.length() > 40 ? question.substring(0, 40) + "..." : question);
+
+            // 异步评估已关闭
+            // if (ragasEvalEnabled) { asyncEval(question, answer, context, chatClient); }
 
             return Map.of(
                     StateKeys.ANSWER, answer,
@@ -105,5 +130,12 @@ public class LLMGenerateNode {
                     StateKeys.STEPS, "生成失败: " + e.getMessage()
             );
         }
+    }
+
+    /** 检测回答是否为反问/澄清式（40字内且含疑问词） */
+    private static boolean isClarification(String answer) {
+        if (answer == null || answer.length() > 60) return false;
+        return answer.contains("请问") || answer.contains("您想了解") || answer.contains("具体是")
+                || answer.contains("哪个方面") || answer.contains("能详细");
     }
 }
