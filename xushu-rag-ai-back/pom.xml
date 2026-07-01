@@ -111,6 +111,13 @@
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
+        <!-- Spring AI Alibaba Graph Agent 工作流引擎（StateGraph + Node编排） -->
+        <dependency>
+            <groupId>com.alibaba.cloud.ai</groupId>
+            <artifactId>spring-ai-alibaba-agent-framework</artifactId>
+            <version>${spring-ai-alibaba.version}</version>
+        </dependency>
+
 
         <dependency>
             <groupId>com.alibaba.cloud.ai</groupId>

@@ -25,6 +25,20 @@ public class PromptTemplate {
 
     private String templateContent;
 
+    /**
+     * 模板语义描述（用于意图分类时匹配）
+     *
+     * @author Joseph
+     */
+    private String description;
+
+    /**
+     * 模板类型：calculation(计算)/reference(查阅)/operation(操作)/default(默认)
+     *
+     * @author Joseph
+     */
+    private String templateType;
+
     private String variables;
 
     private String status;

@@ -24,6 +24,7 @@ import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
@@ -54,6 +55,7 @@ public class AiRagController {
      * @author Joseph
      */
     @Autowired
+    @Qualifier("versionFirstRerankStrategy")
     private IRerankStrategy rerankStrategy;
 
     /**
@@ -231,20 +233,21 @@ public class AiRagController {
             retrievedDocs = vectorStore.similaritySearch(searchRequestBuilder.build());
         } catch (Exception e) {
             log.error("向量检索失败，Milvus可能未加载collection或连接异常: {}", e.getMessage());
-            // 无检索结果时直接返回AI自由回答，不中断对话
             retrievedDocs = Collections.emptyList();
         }
+        log.info("[Old] ①Milvus检索 → {}个chunk", retrievedDocs.size());
 
-        // 策略模式重排序（当前：版本优先；Phase 2：LLM语义重排）
         Map<String, Object> rerankContext = new HashMap<>();
         rerankContext.put("query", message);
         rerankContext.put("kbIds", kbIds);
         List<Document> rankedDocs = rerankStrategy.rerank(retrievedDocs, rerankContext);
+        log.info("[Old] ②VersionFirst排序 → {}个chunk（不过滤）", rankedDocs.size());
 
         if (!rankedDocs.isEmpty()) {
-            // 小→大：按page去重，映射到父页面全文
             List<Document> parentDocs = mapToParentPages(rankedDocs);
             String context = buildParentContext(parentDocs);
+            log.info("[Old] ③Small-to-Big: {}chunk→{}父页面, {}字, +QuestionAnswerAdvisor(二次检索原始chunk)",
+                    rankedDocs.size(), parentDocs.size(), context.length());
 
             clientRequestSpec = clientRequestSpec
                     .advisors(QuestionAnswerAdvisor.builder(vectorStore)

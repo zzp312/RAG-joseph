@@ -10,10 +10,10 @@
 
     <properties>
         <!-- Spring AI -->
-        <spring-ai.version>1.0.0</spring-ai.version>
+        <spring-ai.version>1.1.0</spring-ai.version>
 
-        <!-- Spring AI Alibaba  百炼-->
-        <spring-ai-alibaba.version>1.0.0.1</spring-ai-alibaba.version>
+        <!-- Spring AI Alibaba  百炼（含 Graph Agent 工作流引擎） -->
+        <spring-ai-alibaba.version>1.1.2.0</spring-ai-alibaba.version>
         <spring-boot.version>3.4.2</spring-boot.version>
         
         <!-- Other Dependencies Versions -->
@@ -63,6 +63,15 @@
                 <groupId>com.alibaba.cloud.ai</groupId>
                 <artifactId>spring-ai-alibaba-starter</artifactId>
                 <version>${spring-ai-alibaba.version}</version>
+            </dependency>
+
+            <!-- Spring AI Alibaba BOM（含Graph Agent Framework） -->
+            <dependency>
+                <groupId>com.alibaba.cloud.ai</groupId>
+                <artifactId>spring-ai-alibaba-bom</artifactId>
+                <version>${spring-ai-alibaba.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
             </dependency>
             
             <!-- Other Dependencies -->

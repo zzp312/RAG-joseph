@@ -163,6 +163,8 @@ CREATE TABLE `prompt_template` (
                                    `kb_id` BIGINT COMMENT '知识库ID（NULL表示全局模板）',
                                    `name` VARCHAR(255) NOT NULL COMMENT '模板名称',
                                    `template_content` TEXT NOT NULL COMMENT '模板内容',
+                                   `description` VARCHAR(500) COMMENT '模板描述（用于意图分类语义匹配）',
+                                   `template_type` VARCHAR(50) DEFAULT 'default' COMMENT '模板类型：calculation/reference/operation/chitchat/default',
                                    `variables` JSON COMMENT '支持的变量列表',
                                    `status` VARCHAR(50) DEFAULT 'ACTIVE' COMMENT '状态：ACTIVE-启用，INACTIVE-禁用',
                                    `is_default` TINYINT(1) DEFAULT 0 COMMENT '是否默认模板：0-否，1-是',
