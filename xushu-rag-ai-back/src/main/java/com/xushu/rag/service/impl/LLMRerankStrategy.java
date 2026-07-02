@@ -3,10 +3,13 @@ package com.xushu.rag.service.impl;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.xushu.rag.service.IRerankStrategy;
+import com.xushu.rag.structured.ScoreItem;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.ai.document.Document;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -21,6 +24,7 @@ import java.util.stream.Collectors;
  * 批量：每3页为一批调用LLM，降低API调用次数
  * </p>
  * <p>仅无filter时触发（有KB/文件过滤时搜索空间已缩窄，Rerank收益递减）</p>
+ * <p>使用BeanOutputConverter实现结构化输出，fallback保留原有3层解析</p>
  *
  * @author Joseph
  */
@@ -42,6 +46,7 @@ public class LLMRerankStrategy implements IRerankStrategy {
     private static final int PAGE_TRUNCATE_LENGTH = 2000;
 
     private final ChatClient chatClient;
+    private final BeanOutputConverter<List<ScoreItem>> converter;
 
     private static final String RERANK_PROMPT = """
             你是一个文档相关性评估器。评估以下页面内容与用户问题的相关程度。
@@ -59,12 +64,14 @@ public class LLMRerankStrategy implements IRerankStrategy {
             
             注意：页面可能很长，仅展示了前段内容。如果文档主题（如文件名、领域）与问题匹配，即使截取部分未直接回答，也应给出中等分数(0.5~0.7)。
             
-            请严格按JSON格式输出，仅包含score字段：
-            {"score": 0.0}
+            请严格按JSON数组格式输出，每个页面一个{"score": x.x}对象：
+            [{"score": 0.0}, {"score": 0.0}, ...]
             """;
 
     public LLMRerankStrategy(ChatModel chatModel) {
         this.chatClient = ChatClient.builder(chatModel).build();
+        this.converter = new BeanOutputConverter<>(
+                new ParameterizedTypeReference<List<ScoreItem>>() {});
     }
 
     @Override
@@ -179,7 +186,11 @@ public class LLMRerankStrategy implements IRerankStrategy {
     private Map<Integer, Double> scoreBatch(String query, String batchText) {
         Map<Integer, Double> scores = new LinkedHashMap<>();
         try {
-            String prompt = String.format(RERANK_PROMPT, query, batchText);
+            // 注入JSON Schema格式指令到Prompt末尾
+            String format = converter.getFormat();
+            String basePrompt = String.format(RERANK_PROMPT, query, batchText);
+            String prompt = basePrompt + "\n" + format;
+
             String response = chatClient.prompt()
                     .user(prompt)
                     .call()
@@ -190,8 +201,19 @@ public class LLMRerankStrategy implements IRerankStrategy {
                 return scores;
             }
 
-            // 解析JSON: {"score": 0.7} 或 {"scores": [0.7, 0.3, 0.9]} 或 [{"score":0.7}, ...]
-            parseScores(response, scores);
+            // 【主路径】BeanOutputConverter结构化解析
+            try {
+                List<ScoreItem> items = converter.convert(response);
+                for (int i = 0; i < items.size(); i++) {
+                    scores.put(i, clipScore(items.get(i).score()));
+                }
+                return scores;
+            } catch (Exception convertEx) {
+                log.warn("[LLMRerank] BeanOutputConverter解析失败，回退3层fallback解析: {}",
+                        convertEx.getMessage());
+                // 【fallback】回退原有3层兼容解析
+                parseScores(response, scores);
+            }
         } catch (Exception e) {
             log.error("[LLMRerank] LLM打分异常: {}", e.getMessage());
         }

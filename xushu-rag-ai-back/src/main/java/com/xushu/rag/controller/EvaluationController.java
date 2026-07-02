@@ -3,9 +3,11 @@ package com.xushu.rag.controller;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
+import com.xushu.rag.structured.EvalScore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
@@ -19,6 +21,7 @@ import java.util.stream.Collectors;
 /**
  * RAG 质量评估控制器（LLM-as-Judge 模式）
  * <p>接收测试用例 JSON，用 LLM 评估 Faithfulness / AnswerRelevancy / ContextPrecision / ContextRecall</p>
+ * <p>使用BeanOutputConverter实现结构化评分输出，fallback保留原有正则数字提取</p>
  *
  * @author Joseph
  */
@@ -29,10 +32,12 @@ public class EvaluationController {
 
     private final ChatClient chatClient;
     private final VectorStore vectorStore;
+    private final BeanOutputConverter<EvalScore> converter;
 
     public EvaluationController(ChatModel chatModel, VectorStore vectorStore) {
         this.chatClient = ChatClient.builder(chatModel).build();
         this.vectorStore = vectorStore;
+        this.converter = new BeanOutputConverter<>(EvalScore.class);
     }
 
     /**
@@ -246,11 +251,25 @@ public class EvaluationController {
 
     private double scoreCall(String prompt) {
         try {
-            String resp = chatClient.prompt().user(prompt).call().content();
+            // 注入JSON Schema格式指令
+            String format = converter.getFormat();
+            String fullPrompt = prompt + "\n" + format;
+
+            String resp = chatClient.prompt().user(fullPrompt).call().content();
             if (resp == null) return 0;
-            resp = resp.trim().replaceAll("[^0-9.]", "");
-            double score = Double.parseDouble(resp);
-            return Math.max(0, Math.min(1, score));
+
+            // 【主路径】BeanOutputConverter结构化解析
+            try {
+                EvalScore result = converter.convert(resp);
+                return Math.max(0, Math.min(1, result.score()));
+            } catch (Exception convertEx) {
+                // 【fallback】回退原有正则数字提取
+                log.debug("[Eval] BeanOutputConverter解析失败，回退正则提取: {}",
+                        convertEx.getMessage());
+                resp = resp.trim().replaceAll("[^0-9.]", "");
+                double score = Double.parseDouble(resp);
+                return Math.max(0, Math.min(1, score));
+            }
         } catch (Exception e) {
             return 0;
         }

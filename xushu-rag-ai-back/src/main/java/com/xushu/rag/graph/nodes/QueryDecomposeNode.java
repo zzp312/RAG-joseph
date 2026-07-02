@@ -1,11 +1,12 @@
 package com.xushu.rag.graph.nodes;
 
 import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.JSONArray;
 import com.xushu.rag.graph.StateKeys;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.converter.BeanOutputConverter;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -14,6 +15,7 @@ import java.util.*;
  * 查询拆解Node（对标冠军方案 Query Router）
  * <p>对 COMPARISON / AGGREGATION 意图，LLM 拆为多个子问题，
  * 后续由 Graph 并行执行检索。非拆解意图直接透传。</p>
+ * <p>使用BeanOutputConverter实现结构化输出，fallback保留原有JSON子串提取</p>
  *
  * @author Joseph
  */
@@ -22,9 +24,12 @@ import java.util.*;
 public class QueryDecomposeNode {
 
     private final ChatClient chatClient;
+    private final BeanOutputConverter<List<String>> converter;
 
     public QueryDecomposeNode(ChatModel chatModel) {
         this.chatClient = ChatClient.builder(chatModel).build();
+        this.converter = new BeanOutputConverter<>(
+                new ParameterizedTypeReference<List<String>>() {});
     }
 
     @SuppressWarnings("unchecked")
@@ -59,7 +64,7 @@ public class QueryDecomposeNode {
     }
 
     private List<String> decompose(String question) {
-        String prompt = """
+        String basePrompt = """
             将以下复杂问题拆解为2~4个独立的简单子问题，每个子问题可以独立检索回答。
             以JSON数组格式返回，只返回数组不要其他内容。
             示例输入："SVM和决策树有什么区别"
@@ -68,18 +73,29 @@ public class QueryDecomposeNode {
             问题：%s
             """.formatted(question);
 
+        // 注入JSON Schema格式指令
+        String format = converter.getFormat();
+        String prompt = basePrompt + "\n" + format;
+
         try {
             String resp = chatClient.prompt().user(prompt).call().content();
             if (resp == null) return Collections.emptyList();
             resp = resp.trim();
 
-            // 尝试提取 JSON 数组
-            int start = resp.indexOf('[');
-            int end = resp.lastIndexOf(']');
-            if (start >= 0 && end > start) {
-                resp = resp.substring(start, end + 1);
+            // 【主路径】BeanOutputConverter结构化解析
+            try {
+                return converter.convert(resp);
+            } catch (Exception convertEx) {
+                // 【fallback】回退原有JSON子串提取解析
+                log.warn("[Decompose] BeanOutputConverter解析失败，回退子串提取: {}",
+                        convertEx.getMessage());
+                int start = resp.indexOf('[');
+                int end = resp.lastIndexOf(']');
+                if (start >= 0 && end > start) {
+                    resp = resp.substring(start, end + 1);
+                }
+                return JSON.parseArray(resp, String.class);
             }
-            return JSON.parseArray(resp, String.class);
         } catch (Exception e) {
             log.warn("[Decompose] 拆解失败: {}", e.getMessage());
             return Collections.emptyList();
