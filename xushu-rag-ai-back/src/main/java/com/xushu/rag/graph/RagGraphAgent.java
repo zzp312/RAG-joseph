@@ -91,6 +91,15 @@ public class RagGraphAgent {
         return compiledGraph;
     }
 
+    /** 无需检索的意图分类（闲聊类，直接LLM回复） */
+    private static final java.util.Set<String> SKIP_RETRIEVAL_CATEGORIES =
+            java.util.Set.of("chitchat", "unknown");
+
+    /** 判断当前分类是否需要跳过检索节点 */
+    private static boolean isSkipRetrieval(String category) {
+        return SKIP_RETRIEVAL_CATEGORIES.contains(category != null ? category.toLowerCase() : "");
+    }
+
     /** 所有State Key（新增key在此追加即可） */
     private static final String[] ALL_STATE_KEYS = {
             StateKeys.QUESTION, StateKeys.CATEGORY, StateKeys.SYSTEM_PROMPT,
@@ -129,7 +138,14 @@ public class RagGraphAgent {
                 Map.of("query_decompose", "query_decompose", "prompt_route", "prompt_route"));
 
         stateGraph.addEdge("query_decompose", "prompt_route");
-        stateGraph.addEdge("prompt_route", "retrieval");
+
+        // 条件边：chitchat 不需要检索，直接跳到 llm_generate
+        stateGraph.addConditionalEdges("prompt_route",
+                state -> java.util.concurrent.CompletableFuture.completedFuture(
+                        isSkipRetrieval((String) state.data().getOrDefault(StateKeys.CATEGORY, ""))
+                                ? "llm_generate" : "retrieval"),
+                Map.of("retrieval", "retrieval", "llm_generate", "llm_generate"));
+
         stateGraph.addEdge("retrieval", "context_build");
         stateGraph.addEdge("context_build", "llm_generate");
         stateGraph.addEdge("llm_generate", END);

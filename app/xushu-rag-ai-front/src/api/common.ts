@@ -7,6 +7,7 @@ export const enum KnowApi {
   ListByKb = "/knowledge/list-by-kb",
   DocHistory = "/knowledge/doc-history",
   LatestDocs = "/knowledge/latest-docs",
+  LatestDocsBatch = "/knowledge/latest-docs-batch",
 }
 
 export const enum ChatApi {

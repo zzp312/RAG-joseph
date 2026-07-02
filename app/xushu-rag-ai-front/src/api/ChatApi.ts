@@ -5,6 +5,7 @@ export const ChatApi = {
   Chat: "/chat/stream",
   RagChat: "/ai/rag",
   RagWithKb: "/ai/rag-with-kb",
+  RagGraph: "/chat/rag-graph",  // Graph Agent 工作流模式
 };
 
 // 聊天消息接口
@@ -12,6 +13,19 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   isTyping?: boolean;
+  /** 工作流步骤列表（内联展示，仅assistant消息使用） */
+  steps?: Array<{
+    type: 'thinking' | 'tool' | 'error';
+    content: string;
+    timestamp: number;
+    durationMs?: number;
+  }>;
+  /** 步骤块是否折叠 */
+  stepsCollapsed?: boolean;
+  /** 本轮步骤是否全部完成 */
+  stepsCompleted?: boolean;
+  /** 本轮总耗时（毫秒） */
+  totalDurationMs?: number;
 }
 
 // 发送消息接口 (传统fetch方式)

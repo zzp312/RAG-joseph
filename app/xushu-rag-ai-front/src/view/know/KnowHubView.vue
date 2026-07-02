@@ -94,7 +94,11 @@
             </template>
           </el-table-column>
           <el-table-column prop="fileName" label="文件名" width="380" />
-          <el-table-column prop="kbName" label="所属知识库" width="150" />
+          <el-table-column label="所属知识库" width="150">
+            <template #default="scope">
+              {{ scope.row.kbName || getKbName(scope.row.kbId) || '-' }}
+            </template>
+          </el-table-column>
           <el-table-column prop="version" label="版本" width="120">
             <template #default="scope">
               <el-tag size="small" :type="scope.row.version ? 'success' : 'info'">
@@ -407,10 +411,13 @@ const uploadFile = () => {
   }
 
   isUploading.value = true;
-  const useKbUpload = selectedKbId.value > 0 || autoClassify.value;
-  const uploadPromise = useKbUpload
-    ? uploadWithKbApi(files, selectedKbId.value > 0 ? selectedKbId.value : undefined, undefined, autoClassify.value)
-    : uploadFileApi(files);
+  // 统一使用分库上传：指定知识库或自动分类，确保文件关联kb_id
+  const uploadPromise = uploadWithKbApi(
+    files, 
+    selectedKbId.value > 0 ? selectedKbId.value : undefined, 
+    undefined, 
+    autoClassify.value
+  );
 
   uploadPromise
     .then((res) => {
@@ -770,6 +777,13 @@ const deletePromptTemplate = (row: any) => {
         });
     })
     .catch(() => {});
+};
+
+// 根据kbId查找知识库名称（表格列回退）
+const getKbName = (kbId: number | string | undefined): string => {
+  if (kbId == null) return '';
+  const kb = knowledgeBases.value.find((k: any) => k.id == kbId);
+  return kb ? kb.name : '';
 };
 
 onMounted(() => {

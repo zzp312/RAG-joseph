@@ -160,3 +160,10 @@ export const getDocumentHistoryApi = async (kbId: number, originalName: string):
 export const getLatestDocumentsApi = async (kbId: number): Promise<Res> => {
   return service.get(`${KnowApi.LatestDocs}/${kbId}`);
 };
+
+// 批量查询多个知识库的最新文档（用于知识库级联选择）
+export const getLatestDocumentsBatchApi = async (kbIds: number[]): Promise<Res> => {
+  return service.get(KnowApi.LatestDocsBatch, {
+    params: { kbIds: kbIds.join(',') },
+  });
+};
