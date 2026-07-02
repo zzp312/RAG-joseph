@@ -36,6 +36,9 @@ public class QuestionInputNode {
         result.put(StateKeys.SOURCES, state.get(StateKeys.SOURCES));
         result.put(StateKeys.EFFECTIVE_KB_ID, state.get(StateKeys.EFFECTIVE_KB_ID));
         result.put(StateKeys.CONVERSATION_ID, state.get(StateKeys.CONVERSATION_ID));
+        // 首个步骤：让用户立即感知到请求已被接收
+        result.put(StateKeys.STEPS, "收到问题");
+        result.put(StateKeys.STEP_TYPE, StateKeys.StepType.THINKING);
         return result;
     }
 }

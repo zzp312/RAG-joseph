@@ -57,7 +57,8 @@ public class PromptRouteNode {
         return Map.of(
                 StateKeys.SYSTEM_PROMPT, systemPrompt,
                 StateKeys.TEMPLATE_ID, templateId,
-                StateKeys.TEMPLATE_NAME, templateName
+                StateKeys.TEMPLATE_NAME, templateName,
+                StateKeys.STEPS, "提示词路由: " + templateName
         );
     }
 }

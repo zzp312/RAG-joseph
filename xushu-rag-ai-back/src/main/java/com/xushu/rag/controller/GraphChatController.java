@@ -6,6 +6,7 @@ import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import com.xushu.rag.common.ApplicationConstant;
 import com.xushu.rag.context.BaseContext;
 import com.xushu.rag.graph.RagGraphAgent;
+import com.xushu.rag.graph.SseFormatter;
 import com.xushu.rag.graph.StateKeys;
 import com.xushu.rag.graph.nodes.HybridSearchTestNode;
 import lombok.RequiredArgsConstructor;
@@ -13,11 +14,14 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.http.MediaType;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Graph Agent 问答控制器
@@ -58,7 +62,7 @@ public class GraphChatController {
      * @return SSE流
      */
     @PostMapping(value = "/rag-graph", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<String> ragGraphChat(
+    public Flux<ServerSentEvent<String>> ragGraphChat(
             @RequestParam(value = "message", defaultValue = "你好") String message,
             @RequestParam(value = "kbIds", required = false) List<Long> kbIds,
             @RequestParam(value = "sources", required = false) List<String> sources,
@@ -90,64 +94,54 @@ public class GraphChatController {
         initialState.put(StateKeys.CONTEXT, "");
         initialState.put(StateKeys.ANSWER, "");
 
-        // 编译Graph并流式执行
-        CompiledGraph compiledGraph;
-        try {
-            compiledGraph = ragGraphAgent.buildGraph();
-        } catch (Exception e) {
-            log.error("[GraphChat] Graph编译失败", e);
-            return Flux.just("event: message\ndata: Graph编译失败: " + e.getMessage() + "\n\n");
-        }
+        // 创建 Sinks.Many 用于解耦节点执行和 SSE 发送
+        Sinks.Many<ServerSentEvent<String>> sink = Sinks.many().unicast().onBackpressureBuffer();
 
-        return compiledGraph.stream(initialState)
-                .map(output -> {
-                    if (output instanceof StreamingOutput<?> streamOut) {
-                        String nodeName = streamOut.node();
-                        OverAllState nodeState = streamOut.state();
-                        Map<String, Object> data = nodeState.data();
+        // 异步执行 Graph
+        CompletableFuture.runAsync(() -> {
+            try {
+                // 编译Graph（带回调）
+                CompiledGraph compiledGraph = ragGraphAgent.buildGraphWithCallback(callbackData -> {
+                    try {
+                        String nodeName = (String) callbackData.get("nodeName");
+                        Long nodeTs = (Long) callbackData.get("timestamp");
+                        String steps = (String) callbackData.getOrDefault(StateKeys.STEPS, "");
 
-                        // 步骤消息
-                        String steps = (String) data.getOrDefault(StateKeys.STEPS, "");
+                        log.info("[SSE推送] nodeName={}, timestamp={}", nodeName, nodeTs);
 
                         // 最终节点 → 发送答案
-                        if ("llm_generate".equals(nodeName) || "__end__".equals(nodeName)) {
-                            String answer = (String) data.getOrDefault(StateKeys.ANSWER, "");
+                        if ("llm_generate".equals(nodeName)) {
+                            String answer = (String) callbackData.getOrDefault(StateKeys.ANSWER, "");
                             if (!answer.isEmpty()) {
-                                return formatSSE("message", answer);
+                                sink.tryEmitNext(SseFormatter.message(answer));
                             }
+                            return;
                         }
 
-                        // 中间节点 → 发送步骤事件（type从State中读取，由各Node声明）
+                        // 中间节点 → 发送步骤事件
                         if (steps != null && !steps.isEmpty()) {
-                            String type = (String) data.getOrDefault(StateKeys.STEP_TYPE,
+                            String type = (String) callbackData.getOrDefault(StateKeys.STEP_TYPE,
                                     StateKeys.StepType.THINKING);
-                            return formatSSEStep(type, steps);
+                            sink.tryEmitNext(SseFormatter.step(type, steps, nodeTs));
                         }
+                    } catch (Exception e) {
+                        log.error("[SSE推送失败]", e);
                     }
-                    return ""; // 跳过无需展示的事件
-                })
-                .filter(s -> !s.isEmpty())
-                .concatWith(Flux.just(formatSSE("done", "")));
-    }
+                });
 
-    /**
-     * 格式化 SSE message 事件
-     */
-    private String formatSSE(String eventType, String content) {
-        if ("done".equals(eventType)) {
-            return "event: done\ndata: [DONE]\n\n";
-        }
-        return "event: message\ndata: " + content.replace("\n", "\\n") + "\n\n";
-    }
+                // 执行Graph（不使用stream，直接invoke）
+                compiledGraph.invoke(initialState);
 
-    /**
-     * 格式化 SSE step 事件
-     */
-    private String formatSSEStep(String type, String content) {
-        return "event: step\ndata: {\"type\":\"" + type + "\",\"content\":\"" + escapeJson(content) + "\"}\n\n";
-    }
+                // 发送结束信号
+                sink.tryEmitNext(SseFormatter.done());
+                sink.tryEmitComplete();
 
-    private String escapeJson(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+            } catch (Exception e) {
+                log.error("[GraphChat] 执行失败", e);
+                sink.tryEmitError(e);
+            }
+        });
+
+        return sink.asFlux();
     }
 }

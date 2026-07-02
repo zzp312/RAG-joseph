@@ -26,6 +26,10 @@ export interface ChatMessage {
   stepsCompleted?: boolean;
   /** 本轮总耗时（毫秒） */
   totalDurationMs?: number;
+  /** 后端 SSE 攒批时的 fallback 占位是否可见(后端长时间不发新 step 时为 true) */
+  fallbackVisible?: boolean;
+  /** fallback 占位展示文本,如 "正在执行 检索..." */
+  fallbackText?: string | null;
 }
 
 // 发送消息接口 (传统fetch方式)

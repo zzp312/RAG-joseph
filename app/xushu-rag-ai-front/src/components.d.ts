@@ -11,6 +11,5 @@ declare module 'vue' {
     MDView: typeof import('./components/MDView.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
-    WorkflowStepsPanel: typeof import('./components/WorkflowStepsPanel.vue')['default']
   }
 }

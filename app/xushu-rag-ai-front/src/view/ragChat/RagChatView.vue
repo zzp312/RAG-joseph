@@ -6,7 +6,7 @@
              :class="['message', message.role === 'user' ? 'user-message' : 'assistant-message']">
           <div class="message-wrapper">
             <!-- 工作流步骤块（内联在答案上方） -->
-            <div v-if="message.role === 'assistant' && message.steps && message.steps.length > 0"
+            <div v-if="message.role === 'assistant' && (message.steps?.length || message.isTyping)"
                  class="workflow-steps">
               <div class="workflow-steps-header" @click="toggleMessageSteps(message)">
                 <span class="toggle-icon">{{ message.stepsCollapsed ? '▸' : '▾' }}</span>
@@ -15,12 +15,28 @@
                 </span>
               </div>
               <div v-show="!message.stepsCollapsed" class="workflow-steps-body">
-                <div v-for="(step, idx) in message.steps" :key="idx" class="step-row">
-                  <span class="step-icon">{{ getStepIcon(step.type) }}</span>
-                  <span class="step-content">{{ step.content }}</span>
-                  <span v-if="step.durationMs" class="step-duration">
-                    {{ formatDuration(step.durationMs) }}
-                  </span>
+                <div class="step-bubbles">
+                  <div v-for="(step, idx) in message.steps" :key="idx"
+                       class="step-bubble" :class="['type-' + step.type]"
+                       :style="{ animationDelay: (idx * 80) + 'ms' }">
+                    <span class="step-icon">{{ getStepIcon(step.type) }}</span>
+                    <span class="step-content">{{ step.content }}</span>
+                    <span v-if="step.durationMs" class="step-duration">
+                      {{ formatDuration(step.durationMs) }}
+                    </span>
+                  </div>
+                  <!-- 第一个步骤到达前的占位提示 -->
+                  <div v-if="message.isTyping && (!message.steps || message.steps.length === 0)"
+                       class="step-bubble type-thinking thinking-pulse">
+                    <span class="step-icon">💭</span>
+                    <span class="step-content">思考中</span>
+                  </div>
+                  <!-- fallback 占位:后端 SSE 攒批时,显示"正在执行 [上一节点]..." -->
+                  <div v-else-if="message.isTyping && message.fallbackVisible && message.fallbackText"
+                       class="step-bubble type-thinking thinking-pulse">
+                    <span class="step-icon">⏳</span>
+                    <span class="step-content">{{ message.fallbackText }}</span>
+                  </div>
                 </div>
                 <div v-if="message.stepsCompleted" class="step-summary">
                   <el-icon class="summary-icon"><CircleCheckFilled /></el-icon>
@@ -29,8 +45,9 @@
               </div>
             </div>
 
-            <!-- 答案内容 -->
-            <div class="message-content" :class="{ 'typing': message.isTyping }" v-html="renderMarkdown(message.content)">
+            <!-- 答案内容：直接展示，无打字机效果 -->
+            <div class="message-content"
+                 v-html="renderMarkdown(message.content)">
             </div>
 
             <el-button
@@ -148,7 +165,10 @@ const {
   addStep,
   endSession,
   getStepIcon,
-  formatDuration
+  formatDuration,
+  totalDurationMs,
+  fallbackVisible,
+  fallbackText
 } = useWorkflowSteps()
 
 const loadKnowledgeFiles = () => {
@@ -229,12 +249,13 @@ const sendMessage = (ragUrl: string) => {
     steps: [] as WorkflowStep[],
     stepsCollapsed: false,
     stepsCompleted: false,
-    totalDurationMs: 0
+    totalDurationMs: 0,
+    fallbackVisible: false,
+    fallbackText: null
   })
 
   const lastIndex = messages.value.length - 1
   const reactiveMessage = messages.value[lastIndex]
-  let isFirstChunk = true;
 
   // source过滤用原始文件名（匹配Milvus metadata.source），非OSS存储名
   const fileSources = selectedFiles.value.map(id => {
@@ -242,67 +263,65 @@ const sendMessage = (ragUrl: string) => {
     return file ? (file.originalName || file.fileName) : ''
   }).filter(name => name !== '')
 
-  getStreamChat(currentInput, ragUrl, (value) => {
-    // @microsoft/fetch-event-source 的局限：所有 SSE event 都会触发 onmessage
-    // 规则：
-    //   - data 是 [DONE]   → 流结束，忽略
-    //   - data 以 '{' 开头 → step 事件，解析后推入内联步骤块
-    //   - 其他             → 真实答案内容
-    const rawData = value.data || '';
-    if (rawData === '[DONE]') {
-      return;  // 流结束哨兵
+  getStreamChat(currentInput, ragUrl, (event) => {
+    // 后端已使用 ServerSentEvent 规范发送 event 与 data，按 event 名分发
+    const eventName = event.event || ''
+    const rawData = event.data || ''
+
+    if (eventName === 'done' || rawData === '[DONE]') {
+      return
     }
-    if (rawData.startsWith('{')) {
+
+    // 周期性把 composable 的 fallback 状态同步到当前消息(因为定时器在 composable 内部)
+    reactiveMessage.fallbackVisible = fallbackVisible.value
+    reactiveMessage.fallbackText = fallbackText.value
+
+    if (eventName === 'step') {
       try {
         const stepData = JSON.parse(rawData)
         // 写入composable（去重+耗时计算）
-        addStep(stepData.type || 'thinking', stepData.content || '')
+        // 透传后端节点完成时间戳,作为该 step 的真实完成时间,
+        // 避免后端攒批时所有 step durationMs 都退化成"首字节到当前"的错误值
+        addStep(stepData.type || 'thinking', stepData.content || '', stepData.ts)
         // 同步到消息对象上（用最新副本，触发响应式更新）
         reactiveMessage.steps = [...steps.value]
         // 步骤开始时自动展开，用户看到实时进度
         reactiveMessage.stepsCollapsed = false
+        // 收到新 step 后,fallback 占位立即清掉(直到下一次超时才再次出现)
+        reactiveMessage.fallbackVisible = false
+        reactiveMessage.fallbackText = null
+        scrollToBottom()
       } catch (e) {
         // JSON解析失败，静默忽略
       }
-      return;
+      return
     }
 
-    const text = rawData.replace(/\\n/g, '\n');
-
-    if (isFirstChunk) {
-      reactiveMessage.content = '';
-      isFirstChunk = false;
+    if (eventName === 'message') {
+      const text = rawData.replace(/\\n/g, '\n')
+      reactiveMessage.content += text
+      scrollToBottom()
+      return
     }
-
-    reactiveMessage.content += text
-
-    scrollToBottom()
 
   }, (error) => {
     window.console.error('Error:', error)
     reactiveMessage.content = '抱歉，发生了错误，请稍后重试。'
     endSession()
+    reactiveMessage.isTyping = false
     reactiveMessage.stepsCompleted = true
-    reactiveMessage.totalDurationMs = 0
+    reactiveMessage.totalDurationMs = totalDurationMs.value
   }, () => {
     isLoading.value = false
     reactiveMessage.isTyping = false
     // 结束本轮：固化总耗时
     endSession()
     reactiveMessage.stepsCompleted = true
-    reactiveMessage.totalDurationMs = totalDuration.value
+    reactiveMessage.totalDurationMs = totalDurationMs.value
     // 自动折叠
     reactiveMessage.stepsCollapsed = true
   }, fileSources, selectedKbIds.value, sessionId.value)
 };
-
-/** 暴露给模板：当前会话总耗时 */
-const totalDuration = ref(0)
-watch(steps, () => {
-  if (steps.value.length > 0 && !isLoading.value) {
-    totalDuration.value = Date.now() - (steps.value[0].timestamp - (steps.value[0].durationMs || 0))
-  }
-}, { deep: true })
 
 /** 切换单条消息的步骤折叠状态 */
 function toggleMessageSteps(message: ChatMessage) {
@@ -544,7 +563,7 @@ onMounted(() => {
 }
 
 .workflow-steps-body {
-  padding: 4px 12px 8px;
+  padding: 8px 12px 10px;
   animation: stepsExpand 0.2s ease;
 }
 
@@ -553,13 +572,61 @@ onMounted(() => {
   to   { opacity: 1; max-height: 500px; }
 }
 
-.step-row {
+.step-bubbles {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-  padding: 4px 0;
+}
+
+.step-bubble {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 14px;
+  background: #fff;
+  border: 1px solid #e4e7ed;
   color: #606266;
   font-size: 12px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  transition: all 0.2s ease;
+  max-width: 100%;
+  opacity: 0;
+  transform: translateY(6px);
+  animation: bubbleIn 0.25s ease forwards;
+
+  &.type-thinking {
+    background: #f4f4f5;
+    border-color: #e4e7ed;
+  }
+
+  &.type-tool {
+    background: #ecf5ff;
+    border-color: #d9ecff;
+    color: #409eff;
+  }
+
+  &.type-error {
+    background: #fef0f0;
+    border-color: #fde2e2;
+    color: #f56c6c;
+  }
+
+  &.thinking-pulse {
+    animation: bubbleIn 0.25s ease forwards, pulse 1.5s ease-in-out infinite;
+  }
+}
+
+@keyframes bubbleIn {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
 }
 
 .step-icon {
@@ -573,14 +640,15 @@ onMounted(() => {
   flex: 1;
   min-width: 0;
   word-break: break-word;
+  line-height: 1.4;
 }
 
 .step-duration {
   font-size: 11px;
   color: #909399;
-  background: #fff;
+  background: #f5f7fa;
   padding: 1px 6px;
-  border-radius: 3px;
+  border-radius: 8px;
   flex-shrink: 0;
   font-family: Consolas, Monaco, monospace;
 }

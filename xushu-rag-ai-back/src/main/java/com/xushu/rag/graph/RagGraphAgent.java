@@ -13,6 +13,7 @@ import com.xushu.rag.graph.nodes.*;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Sinks;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -69,6 +70,18 @@ public class RagGraphAgent {
      * @return 可执行的 CompiledGraph
      */
     public CompiledGraph buildGraph() throws Exception {
+        return buildGraphWithCallback(null);
+    }
+
+    /**
+     * 构建并编译 Graph Agent 工作流（带节点完成回调）
+     * <p>用于实现实时 SSE 推送，每个节点完成时立即回调</p>
+     *
+     * @param nodeCallback 节点完成回调，参数为 (nodeName, result, timestamp)
+     * @return 可执行的 CompiledGraph
+     */
+    public CompiledGraph buildGraphWithCallback(
+            java.util.function.Consumer<Map<String, Object>> nodeCallback) throws Exception {
         // 状态更新策略：全部使用覆盖策略（Phase 2新增key自动纳入）
         KeyStrategyFactory keyStrategyFactory = () -> {
             Map<String, KeyStrategy> strategies = new HashMap<>();
@@ -81,7 +94,7 @@ public class RagGraphAgent {
         StateGraph stateGraph = new StateGraph(keyStrategyFactory);
 
         // 子步骤1：注册节点（可扩展）
-        registerNodes(stateGraph);
+        registerNodes(stateGraph, nodeCallback);
 
         // 子步骤2：连接边（可扩展，支持条件分支）
         wireEdges(stateGraph);
@@ -113,13 +126,19 @@ public class RagGraphAgent {
 
     /** 注册所有节点（Phase 2在此追加新节点） */
     protected void registerNodes(StateGraph stateGraph) throws GraphStateException {
-        addNode(stateGraph, "question_input", questionInputNode, StateKeys.StepType.THINKING);
-        addNode(stateGraph, "intent_classify", intentClassifyNode, StateKeys.StepType.THINKING);
-        addNode(stateGraph, "query_decompose", queryDecomposeNode, StateKeys.StepType.THINKING);
-        addNode(stateGraph, "prompt_route", promptRouteNode, StateKeys.StepType.THINKING);
-        addNode(stateGraph, "retrieval", retrievalNode, StateKeys.StepType.TOOL);
-        addNode(stateGraph, "context_build", contextBuildNode, StateKeys.StepType.THINKING);
-        addNode(stateGraph, "llm_generate", llmGenerateNode, StateKeys.StepType.THINKING);
+        registerNodes(stateGraph, null);
+    }
+
+    /** 注册所有节点（带回调） */
+    protected void registerNodes(StateGraph stateGraph,
+                                  java.util.function.Consumer<Map<String, Object>> nodeCallback) throws GraphStateException {
+        addNode(stateGraph, "question_input", questionInputNode, StateKeys.StepType.THINKING, nodeCallback);
+        addNode(stateGraph, "intent_classify", intentClassifyNode, StateKeys.StepType.THINKING, nodeCallback);
+        addNode(stateGraph, "query_decompose", queryDecomposeNode, StateKeys.StepType.THINKING, nodeCallback);
+        addNode(stateGraph, "prompt_route", promptRouteNode, StateKeys.StepType.THINKING, nodeCallback);
+        addNode(stateGraph, "retrieval", retrievalNode, StateKeys.StepType.TOOL, nodeCallback);
+        addNode(stateGraph, "context_build", contextBuildNode, StateKeys.StepType.THINKING, nodeCallback);
+        addNode(stateGraph, "llm_generate", llmGenerateNode, StateKeys.StepType.THINKING, nodeCallback);
     }
 
     /** 连接所有边（comparison/aggregation → query_decompose → prompt_route） */
@@ -154,6 +173,13 @@ public class RagGraphAgent {
     /** 通用节点注册：同步Node → AsyncNodeAction + stepType写入 */
     private <T> void addNode(StateGraph graph, String name, T node, String stepType)
             throws GraphStateException {
+        addNode(graph, name, node, stepType, null);
+    }
+
+    /** 通用节点注册（带回调） */
+    private <T> void addNode(StateGraph graph, String name, T node, String stepType,
+                              java.util.function.Consumer<Map<String, Object>> nodeCallback)
+            throws GraphStateException {
         java.util.function.Function<Map<String, Object>, Map<String, Object>> fn;
         if (node instanceof QuestionInputNode) fn = ((QuestionInputNode) node)::apply;
         else if (node instanceof IntentClassifyNode) fn = ((IntentClassifyNode) node)::apply;
@@ -170,7 +196,18 @@ public class RagGraphAgent {
                 log.info("[Graph ▶] 节点开始: {}", name);
                 Map<String, Object> result = new HashMap<>(fn.apply(state.data()));
                 result.putIfAbsent(StateKeys.STEP_TYPE, stepType);
+                // 统一兜底：确保每个节点都有 STEPS，避免节点完成时没有 step 事件发出
+                result.putIfAbsent(StateKeys.STEPS, "节点完成: " + name);
                 log.info("[Graph ✓] 节点完成: {} ({}ms)", name, System.currentTimeMillis() - start);
+                
+                // 节点完成时立即回调（用于实时 SSE 推送）
+                if (nodeCallback != null) {
+                    Map<String, Object> callbackData = new HashMap<>(result);
+                    callbackData.put("nodeName", name);
+                    callbackData.put("timestamp", System.currentTimeMillis());
+                    nodeCallback.accept(callbackData);
+                }
+                
                 return CompletableFuture.completedFuture(result);
             } catch (Exception e) {
                 log.error("[Graph ✗] 节点失败: {}", name, e);
