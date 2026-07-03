@@ -60,4 +60,21 @@ public final class SseFormatter {
                 .data("[DONE]")
                 .build();
     }
+
+    /**
+     * 生成 divider 分界线事件（人工接管/回AI）
+     *
+     * @param type    分界线类型：human_start / human_end
+     * @param content 分界线文本，如"人工客服已接入"
+     * @return SSE 事件，data 为 JSON
+     */
+    public static ServerSentEvent<String> divider(String type, String content) {
+        JSONObject json = new JSONObject();
+        json.put("type", type == null ? "divider" : type);
+        json.put("content", content == null ? "" : content);
+        return ServerSentEvent.<String>builder()
+                .event("divider")
+                .data(json.toJSONString())
+                .build();
+    }
 }

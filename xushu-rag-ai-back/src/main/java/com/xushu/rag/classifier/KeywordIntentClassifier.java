@@ -38,6 +38,10 @@ public class KeywordIntentClassifier implements IntentClassifier {
                 "规定", "法规", "制度", "流程", "指南", "文档"}) {
             KEYWORD_MAP.put(kw, Collections.singletonList(Category.REFERENCE));
         }
+        // 转人工
+        for (String kw : new String[]{"转人工", "人工客服", "找人工", "叫人来", "找客服", "人工服务"}) {
+            KEYWORD_MAP.put(kw, Collections.singletonList(Category.ESCALATION));
+        }
     }
 
     @Override

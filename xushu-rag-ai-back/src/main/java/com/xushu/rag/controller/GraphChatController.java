@@ -45,6 +45,15 @@ public class GraphChatController {
     /** Redis key前缀：用户检索指纹 */
     private static final String FINGERPRINT_KEY_PREFIX = "rag:kb_fingerprint:";
 
+    /** Redis key前缀：会话模式（AI/HUMAN） */
+    private static final String MODE_KEY_PREFIX = "rag:conversation:mode:";
+
+    /** Redis key前缀：标记之前是否处于人工模式（用于检测回AI） */
+    private static final String WAS_HUMAN_KEY_PREFIX = "rag:conversation:was_human:";
+
+    /** 人工模式TTL（秒） */
+    private static final long HUMAN_MODE_TTL_SECONDS = 300;
+
     /** Milvus BM25 混合检索兼容性检测 */
     @PostMapping(value = "/bm25-test", produces = MediaType.APPLICATION_JSON_VALUE)
     public Mono<String> bm25Test() {
@@ -61,6 +70,7 @@ public class GraphChatController {
      * @param kbIds     选中的知识库ID列表（可选）
      * @param sources   选中的文件列表（可选）
      * @param sessionId 会话标识（多标签页隔离）
+     * @param escalate  是否转人工（用户点击转人工按钮时传true）
      * @return SSE流
      */
     @PostMapping(value = "/rag-graph", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -68,16 +78,46 @@ public class GraphChatController {
             @RequestParam(value = "message", defaultValue = "你好") String message,
             @RequestParam(value = "kbIds", required = false) List<Long> kbIds,
             @RequestParam(value = "sources", required = false) List<String> sources,
-            @RequestParam(value = "sessionId", required = false, defaultValue = "default") String sessionId) {
+            @RequestParam(value = "sessionId", required = false, defaultValue = "default") String sessionId,
+            @RequestParam(value = "escalate", required = false, defaultValue = "false") Boolean escalate) {
 
         Long userId = BaseContext.getCurrentId();
         String conversationId = userId + "_" + sessionId;
+        String modeKey = MODE_KEY_PREFIX + conversationId;
+        String wasHumanKey = WAS_HUMAN_KEY_PREFIX + conversationId;
+
+        // ========== 前置拦截：人工转接 ==========
+
+        // 场景1：用户点击"转人工"按钮
+        if (Boolean.TRUE.equals(escalate)) {
+            redisTemplate.opsForValue().set(modeKey, "HUMAN", HUMAN_MODE_TTL_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
+            redisTemplate.opsForValue().set(wasHumanKey, "1", HUMAN_MODE_TTL_SECONDS + 60, java.util.concurrent.TimeUnit.SECONDS);
+            log.info("[人工转接] 用户主动转人工, conversationId={}", conversationId);
+            return Flux.just(
+                    SseFormatter.divider("human_start", "人工客服已接入"),
+                    SseFormatter.done()
+            );
+        }
+
+        // 场景2：当前处于人工模式 → 刷新TTL，AI不回复
+        String currentMode = redisTemplate.opsForValue().get(modeKey);
+        if ("HUMAN".equals(currentMode)) {
+            redisTemplate.expire(modeKey, HUMAN_MODE_TTL_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
+            log.info("[人工服务中] userId={}, message='{}', conversationId={}, TTL刷新",
+                    userId, message.length() > 50 ? message.substring(0, 50) + "..." : message, conversationId);
+            return Flux.just(SseFormatter.message("HUMAN_MODE"), SseFormatter.done());
+        }
+
+        // 场景3：人工模式刚过期（key不存在但was_human标记仍存在）
+        // → 发送回AI分界线，正常继续
+        String wasHuman = redisTemplate.opsForValue().get(wasHumanKey);
+        boolean returningFromHuman = "1".equals(wasHuman);
 
         // 检索范围变化检测 → 清除旧记忆
         String currentFingerprint = (kbIds != null ? kbIds.toString() : "all")
                 + "|" + (sources != null ? sources.toString() : "all");
-        String redisKey = FINGERPRINT_KEY_PREFIX + conversationId;
-        String previousFingerprint = redisTemplate.opsForValue().getAndSet(redisKey, currentFingerprint);
+        String fingerprintKey = FINGERPRINT_KEY_PREFIX + conversationId;
+        String previousFingerprint = redisTemplate.opsForValue().getAndSet(fingerprintKey, currentFingerprint);
         if (previousFingerprint != null && !previousFingerprint.equals(currentFingerprint)) {
             chatMemory.clear(conversationId);
             log.info("[记忆清除] conversationId={}, {} → {}", conversationId, previousFingerprint, currentFingerprint);
@@ -95,6 +135,8 @@ public class GraphChatController {
         initialState.put(StateKeys.DOCUMENTS, Collections.emptyList());
         initialState.put(StateKeys.CONTEXT, "");
         initialState.put(StateKeys.ANSWER, "");
+        initialState.put(StateKeys.EMOTION, "neutral");
+        initialState.put(StateKeys.ESCALATE, "false");
 
         // 客户端取消标志：由 SSE doOnCancel 置为 true，各节点检查此标志后短路返回
         AtomicBoolean cancelled = new AtomicBoolean(false);
@@ -113,9 +155,14 @@ public class GraphChatController {
         // 异步执行 Graph
         CompletableFuture.runAsync(() -> {
             try {
+                // 场景3：回AI → 先发送分界线
+                if (returningFromHuman) {
+                    tryEmitOrLog(sink, SseFormatter.divider("human_end", "AI已恢复服务"));
+                    redisTemplate.delete(wasHumanKey);
+                    log.info("[人工结束] 超时回AI, conversationId={}", conversationId);
+                }
+
                 // 编译Graph（带回调）
-                // 注意：回调在 graphCallbackExecutor 线程池异步执行，
-                // 不阻塞 Graph 节点链路；客户端断开后通过 cancelled 标志提前 return
                 CompiledGraph compiledGraph = ragGraphAgent.buildGraphWithCallback(callbackData -> {
                     try {
                         // 客户端已断开，不再推送
@@ -129,6 +176,32 @@ public class GraphChatController {
 
                         log.info("[SSE推送] thread={}, nodeName={}, timestamp={}",
                                 Thread.currentThread().getName(), nodeName, nodeTs);
+
+                        // 转人工节点 → 设置Redis + 发送分界线 + 回复文案
+                        if ("escalation".equals(nodeName)) {
+                            redisTemplate.opsForValue().set(modeKey, "HUMAN", HUMAN_MODE_TTL_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
+                            redisTemplate.opsForValue().set(wasHumanKey, "1", HUMAN_MODE_TTL_SECONDS + 60, java.util.concurrent.TimeUnit.SECONDS);
+                            log.info("[人工转接] 情绪触发转人工, conversationId={}", conversationId);
+                            tryEmitOrLog(sink, SseFormatter.divider("human_start", "人工客服已接入"));
+                            if (steps != null && !steps.isEmpty()) {
+                                tryEmitOrLog(sink, SseFormatter.step(StateKeys.StepType.THINKING, steps, nodeTs));
+                            }
+                            // 发送固定文案，让前端气泡有内容
+                            tryEmitOrLog(sink, SseFormatter.message("已为您转接人工客服服务~"));
+                            return;
+                        }
+
+                        // MCP工具调用 → 发送结果是TOOL步骤
+                        if ("mcp_tool_call".equals(nodeName)) {
+                            if (steps != null && !steps.isEmpty()) {
+                                tryEmitOrLog(sink, SseFormatter.step(StateKeys.StepType.TOOL, steps, nodeTs));
+                            }
+                            String answer = (String) callbackData.getOrDefault(StateKeys.ANSWER, "");
+                            if (!answer.isEmpty()) {
+                                tryEmitOrLog(sink, SseFormatter.message(answer));
+                            }
+                            return;
+                        }
 
                         // 最终节点 → 发送答案
                         if ("llm_generate".equals(nodeName)) {
@@ -152,6 +225,13 @@ public class GraphChatController {
 
                 // 执行Graph（不使用stream，直接invoke）
                 compiledGraph.invoke(initialState);
+
+                // 等待异步回调推送完成（graphCallbackExecutor 可能还在推送 step/divider 事件）
+                try {
+                    Thread.sleep(600);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
 
                 long elapsed = System.currentTimeMillis() - requestStart;
                 if (cancelled.get()) {

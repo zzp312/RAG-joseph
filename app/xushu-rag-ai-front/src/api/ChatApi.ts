@@ -10,9 +10,11 @@ export const ChatApi = {
 
 // 聊天消息接口
 export interface ChatMessage {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system' | 'divider';
   content: string;
   isTyping?: boolean;
+  /** 分界线类型（仅 divider 消息使用） */
+  dividerType?: 'human_start' | 'human_end';
   /** 工作流步骤列表（内联展示，仅assistant消息使用） */
   steps?: Array<{
     type: 'thinking' | 'tool' | 'error';

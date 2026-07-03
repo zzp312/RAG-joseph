@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * SseFormatter 单元测试
- * <p>验证 step 事件的 JSON 格式与 ts 字段正确性。</p>
+ * <p>验证 step / message / divider 事件的格式正确性。</p>
  *
  * @author Joseph
  */
@@ -32,5 +32,29 @@ class SseFormatterTest {
         assertNotNull(data);
         assertTrue(data.contains("\"type\":\"tool\""));
         assertFalse(data.contains("\"ts\""));
+    }
+
+    // ==================== divider 测试 ====================
+
+    @Test
+    void divider_humanStart_shouldReturnCorrectEvent() {
+        ServerSentEvent<String> event = SseFormatter.divider("human_start", "人工客服已接入");
+        assertEquals("divider", event.event());
+
+        String data = event.data();
+        assertNotNull(data);
+        assertTrue(data.contains("\"type\":\"human_start\""));
+        assertTrue(data.contains("\"content\":\"人工客服已接入\""));
+    }
+
+    @Test
+    void divider_humanEnd_shouldReturnCorrectEvent() {
+        ServerSentEvent<String> event = SseFormatter.divider("human_end", "AI已恢复服务");
+        assertEquals("divider", event.event());
+
+        String data = event.data();
+        assertNotNull(data);
+        assertTrue(data.contains("\"type\":\"human_end\""));
+        assertTrue(data.contains("\"content\":\"AI已恢复服务\""));
     }
 }

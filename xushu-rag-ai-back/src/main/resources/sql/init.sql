@@ -176,10 +176,33 @@ CREATE TABLE `prompt_template` (
 
 
 -- ----------------------------
+-- Table structure for mcp_tool_registry
+-- ----------------------------
+DROP TABLE IF EXISTS `mcp_tool_registry`;
+CREATE TABLE `mcp_tool_registry` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+    `tool_name` VARCHAR(255) NOT NULL COMMENT '工具名称（如：员工信息查询、发送企微通知）',
+    `description` VARCHAR(500) COMMENT '工具描述（AI根据描述判断何时调用，20字以内）',
+    `tool_category` VARCHAR(50) DEFAULT 'default' COMMENT '工具分类：calculation/reference/operation/default',
+    `endpoint` VARCHAR(500) COMMENT 'MCP Server端点URL（真实对接时填写）',
+    `risk_level` VARCHAR(20) NOT NULL DEFAULT 'MEDIUM' COMMENT '风险等级：LOW/MEDIUM/HIGH',
+    `enabled` TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用：0-禁用，1-启用',
+    `create_time` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    INDEX `idx_enabled` (`enabled`),
+    INDEX `idx_tool_category` (`tool_category`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='MCP工具注册表';
+
+
+-- ----------------------------
 -- Insert default data
 -- ----------------------------
 INSERT INTO `knowledge_base` (`id`, `name`, `description`, `parent_id`, `status`, `create_time`, `update_time`)
 VALUES (1, '通用知识库', '默认通用知识库，存放未分类文档', NULL, 'ACTIVE', NOW(), NOW());
 
-INSERT INTO `prompt_template` (`id`, `kb_id`, `name`, `template_content`, `variables`, `status`, `is_default`, `create_time`, `update_time`)
-VALUES (1, NULL, '通用模板', '你是{kb_name}知识库的智能助手，请根据以下上下文回答问题：\n\n上下文：{context}\n\n问题：{question}\n\n请仅基于上下文回答，不要引入外部知识。', '[\"context\", \"question\", \"kb_name\"]', 'ACTIVE', 1, NOW(), NOW());
+INSERT INTO `prompt_template` (`id`, `kb_id`, `name`, `template_content`, `description`, `template_type`, `variables`, `status`, `is_default`, `create_time`, `update_time`)
+VALUES (1, NULL, '通用模板', '你是{kb_name}知识库的智能助手，请根据以下上下文回答问题：\n\n上下文：{context}\n\n问题：{question}\n\n请仅基于上下文回答，不要引入外部知识。', '默认模板，用于知识检索类问答', 'default', '[\"context\", \"question\", \"kb_name\"]', 'ACTIVE', 1, NOW(), NOW());
+
+INSERT INTO `prompt_template` (`kb_id`, `name`, `template_content`, `description`, `template_type`, `variables`, `status`, `is_default`, `create_time`, `update_time`)
+VALUES (NULL, '操作执行模板', '你是操作助手，请根据用户的要求判断需要执行什么操作。\n\n如果用户尚未明确确认执行，请描述操作详情和所需参数，在回答末尾征求用户确认。\n如果用户已确认（如回复\"是\"\"确定\"\"执行\"），请直接整理操作参数。\n\n用户请求：{question}', '用于执行操作类任务，如信息查询、合同签署、流程办理等', 'operation', '[\"question\"]', 'ACTIVE', 1, NOW(), NOW());

@@ -2,11 +2,20 @@
   <div class="chat-container">
     <el-card class="box-card">
       <div class="chat-messages" ref="messageContainer">
-        <div v-for="(message, index) in messages" :key="index"
-             :class="['message', message.role === 'user' ? 'user-message' : 'assistant-message']">
-          <div class="message-wrapper">
+        <div v-for="(message, index) in messages" :key="index">
+          <!-- 分界线消息 -->
+          <div v-if="message.role === 'divider'"
+               :class="['divider-message', 'divider-' + (message.dividerType || '')]">
+            <div class="divider-line"></div>
+            <span class="divider-text">{{ message.content }}</span>
+            <div class="divider-line"></div>
+          </div>
+
+          <!-- 普通对话消息 -->
+          <div v-else :class="['message', message.role === 'user' ? 'user-message' : 'assistant-message']">
+            <div class="message-wrapper">
             <!-- 工作流步骤块（内联在答案上方） -->
-            <div v-if="message.role === 'assistant' && (message.steps?.length || message.isTyping)"
+            <div v-if="message.role === 'assistant' && !(message as any).humanMode && (message.steps?.length || message.isTyping)"
                  class="workflow-steps">
               <div class="workflow-steps-header" @click="toggleMessageSteps(message)">
                 <span class="toggle-icon">{{ message.stepsCollapsed ? '▸' : '▾' }}</span>
@@ -37,12 +46,20 @@
                     <span class="step-icon">⏳</span>
                     <span class="step-content">{{ message.fallbackText }}</span>
                   </div>
+                  <!-- 所有步骤完成，等待答案生成 -->
+                  <div v-else-if="message.isTyping"
+                       class="step-bubble type-thinking thinking-pulse"
+                       style="margin-top: 8px;">
+                    <span class="step-icon">💭</span>
+                    <span class="step-content">思考中...</span>
+                  </div>
                 </div>
               </div>
             </div>
 
             <!-- 答案内容：直接展示，无打字机效果 -->
             <div class="message-content"
+                 v-show="message.content || !message.isTyping"
                  v-html="renderMarkdown(message.content)">
             </div>
 
@@ -62,10 +79,21 @@
               <el-icon><Document /></el-icon>
             </el-button>
           </div>
+          </div>
         </div>
       </div>
-
+      <!-- 转人工按钮（输入框下方） -->
+      <div class="escalate-bar" v-if="!isHumanMode">
+        <el-button class="escalate-btn" @click="handleEscalate">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+            <circle cx="12" cy="7" r="4"></circle>
+          </svg>
+          <span>转人工</span>
+        </el-button>
+      </div>
       <div class="input-container">
+
         <el-input
           v-model="userInput"
           type="textarea"
@@ -74,6 +102,8 @@
           @keyup.enter="handleRagSend"
         />
       </div>
+
+
 
       <div class="button-group">
         <div class="selection-area">
@@ -128,8 +158,7 @@
         </div>
 
         <div class="action-buttons">
-          <el-button type="primary" @click="handleRagSend" :loading="isLoading">RAG回答</el-button>
-          <el-button type="success" @click="handleOldRagSend" :loading="isLoading">旧版检索</el-button>
+          <el-button type="primary" @click="handleRagSend" :loading="isLoading">发送</el-button>
           <el-button type="warning" @click="clearMessages">清空对话</el-button>
         </div>
       </div>
@@ -151,6 +180,7 @@ import { useWorkflowSteps, type WorkflowStep } from '@/composables/useWorkflowSt
 const messages = ref<ChatMessage[]>([])
 const userInput = ref('')
 const isLoading = ref(false)
+const isHumanMode = ref(false)
 const messageContainer = ref<HTMLElement | null>(null)
 const knowledgeFiles = ref<any[]>([])
 const selectedFiles = ref<string[]>([])
@@ -232,6 +262,35 @@ const handleOldRagSend = async () => {
   sendMessage(ChatApi.RagWithKb)
 };
 
+/** 点击转人工按钮 */
+const handleEscalate = () => {
+  if (isLoading.value || isHumanMode.value) return
+  isLoading.value = true
+  isHumanMode.value = true
+
+  // 插入系统消息
+  messages.value.push({
+    role: 'divider',
+    content: '人工客服已接入',
+    dividerType: 'human_start'
+  } as ChatMessage)
+
+    getStreamChat('转人工', ChatApi.RagGraph, (event) => {
+      if (event.event === 'divider' && event.data) {
+        try {
+          const d = JSON.parse(event.data)
+          if (d.type === 'human_start') isHumanMode.value = true
+        } catch (e) {}
+      }
+    }, (error) => {
+      window.console.error('转人工失败:', error)
+      isLoading.value = false
+    }, () => {
+      isLoading.value = false
+    }, undefined, undefined, sessionId.value, true)
+    scrollToBottom()
+}
+
 const sendMessage = (ragUrl: string) => {
   messages.value.push({
     role: 'user',
@@ -241,6 +300,61 @@ const sendMessage = (ragUrl: string) => {
   const currentInput = userInput.value
   userInput.value = ''
   isLoading.value = true
+
+  // 人工模式下：不创建AI气泡，但收到divider(human_end)时动态创建气泡接收回复
+  if (isHumanMode.value) {
+    let returnReactiveMessage: any = null
+    getStreamChat(currentInput, ragUrl, (event: any) => {
+      const eventName = event.event || ''
+      const rawData = event.data || ''
+      // 回AI分界线
+      if (eventName === 'divider') {
+        try {
+          const d = JSON.parse(rawData)
+          if (d.type === 'human_end') {
+            isHumanMode.value = false
+            messages.value.push({ role: 'divider', content: d.content || 'AI已恢复服务', dividerType: 'human_end' } as ChatMessage)
+            startSession()
+            messages.value.push({ role: 'assistant', content: '', isTyping: true, steps: [] as WorkflowStep[], stepsCollapsed: false, stepsCompleted: false, totalDurationMs: 0, fallbackVisible: false, fallbackText: null } as any)
+            const idx = messages.value.length - 1
+            returnReactiveMessage = messages.value[idx]
+            scrollToBottom()
+          }
+        } catch (e) { }
+        return
+      }
+      if (!returnReactiveMessage || eventName === 'done' || rawData === '[DONE]') return
+      if (eventName === 'step') {
+        try {
+          const stepData = JSON.parse(rawData)
+          addStep(stepData.type || 'thinking', stepData.content || '', stepData.ts)
+          returnReactiveMessage.steps = [...steps.value]
+          returnReactiveMessage.stepsCollapsed = false
+          scrollToBottom()
+        } catch (e) { }
+      }
+      if (eventName === 'message') {
+        const text = rawData.replace(/\\n/g, '\n')
+        if (returnReactiveMessage.isTyping && returnReactiveMessage.content === '') returnReactiveMessage.stepsCollapsed = true
+        returnReactiveMessage.content += text
+        scrollToBottom()
+      }
+    }, (error: any) => {
+      window.console.error('Error:', error)
+    }, () => {
+      isLoading.value = false
+      if (returnReactiveMessage) {
+        returnReactiveMessage.isTyping = false
+        endSession()
+        returnReactiveMessage.stepsCompleted = true
+        returnReactiveMessage.totalDurationMs = totalDurationMs.value
+        returnReactiveMessage.stepsCollapsed = true
+      }
+    }, undefined, undefined, sessionId.value)
+    isLoading.value = false
+    scrollToBottom()
+    return
+  }
 
   // 开始一轮新的步骤收集
   startSession()
@@ -254,8 +368,9 @@ const sendMessage = (ragUrl: string) => {
     stepsCompleted: false,
     totalDurationMs: 0,
     fallbackVisible: false,
-    fallbackText: null
-  })
+    fallbackText: null,
+    humanMode: isHumanMode.value
+  } as any)
 
   const lastIndex = messages.value.length - 1
   const reactiveMessage = messages.value[lastIndex]
@@ -301,9 +416,41 @@ const sendMessage = (ragUrl: string) => {
     }
 
     if (eventName === 'message') {
+      // 人工模式占位消息，静默终止
+      if (rawData === 'HUMAN_MODE') {
+        return
+      }
       const text = rawData.replace(/\\n/g, '\n')
+      // 首次收到答案 token 时：自动收起步骤块，展示最终答案
+      if (reactiveMessage.isTyping && reactiveMessage.content === '') {
+        reactiveMessage.stepsCollapsed = true
+      }
       reactiveMessage.content += text
       scrollToBottom()
+      return
+    }
+
+    if (eventName === 'divider') {
+      try {
+        const dividerData = JSON.parse(rawData)
+        const dtype = dividerData.type || 'human_start'
+        const dcontent = dividerData.content || ''
+
+        if (dtype === 'human_start') {
+          isHumanMode.value = true
+        } else if (dtype === 'human_end') {
+          isHumanMode.value = false
+        }
+
+        messages.value.push({
+          role: 'divider',
+          content: dcontent,
+          dividerType: dtype
+        } as ChatMessage)
+        scrollToBottom()
+      } catch (e) {
+        // JSON解析失败，静默忽略
+      }
       return
     }
 
@@ -317,11 +464,9 @@ const sendMessage = (ragUrl: string) => {
   }, () => {
     isLoading.value = false
     reactiveMessage.isTyping = false
-    // 结束本轮：固化总耗时
     endSession()
     reactiveMessage.stepsCompleted = true
     reactiveMessage.totalDurationMs = totalDurationMs.value
-    // 自动折叠
     reactiveMessage.stepsCollapsed = true
   }, fileSources, selectedKbIds.value, sessionId.value)
 };
@@ -816,4 +961,74 @@ onMounted(() => {
     font-size: 14px;
   }
 }
+/* ===== 分界线消息 ===== */
+.divider-message {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 12px 20px;
+  margin: 8px 0;
+}
+
+.divider-line {
+  flex: 1;
+  height: 1px;
+  background: #dcdfe6;
+}
+
+.divider-text {
+  flex-shrink: 0;
+  font-size: 13px;
+  color: #909399;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* 人工接入分界线 */
+.divider-human_start .divider-line {
+  background: #f56c6c;
+}
+
+.divider-human_start .divider-text {
+  color: #f56c6c;
+}
+
+/* AI恢复分界线 */
+.divider-human_end .divider-line {
+  background: #67c23a;
+}
+
+.divider-human_end .divider-text {
+  color: #67c23a;
+}
+
+/* 转人工按钮 */
+/* 转人工小按钮 */
+.escalate-bar {
+  display: flex;
+  align-items: center;
+  padding: 2px 0;
+}
+
+.escalate-btn {
+  height: 32px !important;
+  padding: 0 8px !important;
+  border: none !important;
+  background: none !important;
+  font-size: 13px !important;
+  color: #409eff;
+  transition: color 0.2s;
+}
+
+.escalate-btn:hover {
+  color: #337ecc;
+}
+
+.escalate-btn svg {
+  flex-shrink: 0;
+  margin-right: 4px;
+}
+
+
 </style>

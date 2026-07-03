@@ -23,13 +23,20 @@ public class LLMIntentClassifier implements IntentClassifier {
     private final BeanOutputConverter<IntentClassification> converter;
 
     private static final String CLASSIFY_PROMPT = """
-            判断用户意图，返回JSON格式：{"intent":"分类","reason":"理由简述","confidence":置信度}
+            判断用户意图和情绪，返回JSON格式：
+            {"intent":"分类","reason":"理由简述","confidence":置信度,"emotion":"情绪"}
 
             意图分类选项：
             calculation - 计算类（工资、补偿、天数、费用等需要数值计算）
             reference  - 资料查阅类（定义、规定、流程、制度等知识查询）
-            operation  - 操作类（入职、离职、请假、合同签署等业务办理）
+            operation  - 操作类（入职、离职、请假、查询信息、合同签署等业务办理）
+            escalation - 转人工（用户明确要求"转人工""找人工客服""叫人来"）
             chitchat   - 闲聊（问候、感谢、无关话题）
+
+            情绪判断选项：
+            positive - 积极、满意
+            neutral  - 中性、正常
+            negative - 负面、不满、不耐烦、愤怒
 
             置信度: 0.0~1.0（对分类判断的确信程度）
             """;
@@ -63,9 +70,10 @@ public class LLMIntentClassifier implements IntentClassifier {
             try {
                 IntentClassification intentResult = converter.convert(result);
                 Category category = Category.fromValue(intentResult.intent());
-                log.info("[L2 LLM] 结构化分类完成 category={}, confidence={}, reason={}",
-                        category, intentResult.confidence(), intentResult.reason());
-                return new ClassifyResult(category, "L2", (int) (intentResult.confidence() * 100));
+                String emotion = intentResult.emotion() != null ? intentResult.emotion() : "neutral";
+                log.info("[L2 LLM] 结构化分类完成 category={}, confidence={}, reason={}, emotion={}",
+                        category, intentResult.confidence(), intentResult.reason(), emotion);
+                return new ClassifyResult(category, "L2", (int) (intentResult.confidence()) * 100, emotion);
             } catch (Exception parseEx) {
                 // 【fallback】结构化解析失败，回退原有逻辑
                 log.warn("[L2 LLM] BeanOutputConverter解析失败，回退字符串匹配: {}", parseEx.getMessage());

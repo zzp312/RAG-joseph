@@ -28,8 +28,12 @@ import static com.alibaba.cloud.ai.graph.StateGraph.START;
  * Graph Agent 构建器（Spring AI Alibaba Graph）
  * <p>
  * 工作流链路:
- * START → QuestionInput → IntentClassify → 条件边(category) →
- *   → PromptRoute → Retrieval → ContextBuild → LLMGenerate → END
+ * START → QuestionInput → IntentClassify → 条件边(emotion/category) →
+ *   → [负面] Escalation → END
+ *   → [操作确认] McpToolCall → END
+ *   → [操作] PromptRoute → LLMGenerate → END
+ *   → [拆解] QueryDecompose → PromptRoute → ...
+ *   → [其他] PromptRoute → Retrieval → ContextBuild → LLMGenerate → END
  * </p>
  *
  * @author Joseph
@@ -45,6 +49,8 @@ public class RagGraphAgent {
     private final ContextBuildNode contextBuildNode;
     private final LLMGenerateNode llmGenerateNode;
     private final QueryDecomposeNode queryDecomposeNode;
+    private final EscalationNode escalationNode;
+    private final McpToolCallNode mcpToolCallNode;
     private final ChatModel chatModel;
     /** SSE 回调专用线程池，避免回调阻塞 Graph 节点链路 */
     private final ThreadPoolExecutor graphCallbackExecutor;
@@ -56,6 +62,8 @@ public class RagGraphAgent {
                          ContextBuildNode contextBuildNode,
                          LLMGenerateNode llmGenerateNode,
                          QueryDecomposeNode queryDecomposeNode,
+                         EscalationNode escalationNode,
+                         McpToolCallNode mcpToolCallNode,
                          ChatModel chatModel,
                          @Qualifier("graphCallbackExecutor") ThreadPoolExecutor graphCallbackExecutor) {
         this.questionInputNode = questionInputNode;
@@ -65,6 +73,8 @@ public class RagGraphAgent {
         this.contextBuildNode = contextBuildNode;
         this.llmGenerateNode = llmGenerateNode;
         this.queryDecomposeNode = queryDecomposeNode;
+        this.escalationNode = escalationNode;
+        this.mcpToolCallNode = mcpToolCallNode;
         this.chatModel = chatModel;
         this.graphCallbackExecutor = graphCallbackExecutor;
     }
@@ -110,9 +120,9 @@ public class RagGraphAgent {
         return compiledGraph;
     }
 
-    /** 无需检索的意图分类（闲聊类，直接LLM回复） */
+    /** 无需检索的意图分类（闲聊+操作+转人工，直接LLM回复或走MCP） */
     private static final java.util.Set<String> SKIP_RETRIEVAL_CATEGORIES =
-            java.util.Set.of("chitchat", "unknown");
+            java.util.Set.of("chitchat", "unknown", "operation", "escalation");
 
     /** 判断当前分类是否需要跳过检索节点 */
     private static boolean isSkipRetrieval(String category) {
@@ -146,26 +156,36 @@ public class RagGraphAgent {
         addNode(stateGraph, "retrieval", retrievalNode, StateKeys.StepType.TOOL, nodeCallback);
         addNode(stateGraph, "context_build", contextBuildNode, StateKeys.StepType.THINKING, nodeCallback);
         addNode(stateGraph, "llm_generate", llmGenerateNode, StateKeys.StepType.THINKING, nodeCallback);
+        addNode(stateGraph, "escalation", escalationNode, StateKeys.StepType.THINKING, nodeCallback);
+        addNode(stateGraph, "mcp_tool_call", mcpToolCallNode, StateKeys.StepType.TOOL, nodeCallback);
     }
 
-    /** 连接所有边（comparison/aggregation → query_decompose → prompt_route） */
+    /** 连接所有边（含情绪检测+转人工+MCP工具调用分支） */
     protected void wireEdges(StateGraph stateGraph) throws GraphStateException {
         stateGraph.addEdge(START, "question_input");
         stateGraph.addEdge("question_input", "intent_classify");
 
-        // 条件边：comparison/aggregation 走拆解节点，其他直连 prompt_route
+        // 条件边：intent_classify → 3路分支
+        // ① emotion=negative 或 category=escalation → 转人工
+        // ② category=operation → 判断是否确认执行 → mcp_tool_call 或 prompt_route
+        // ③ comparison/aggregation → 拆解节点
+        // ④ 其他 → prompt_route
         stateGraph.addConditionalEdges("intent_classify",
                 state -> java.util.concurrent.CompletableFuture.completedFuture(
-                        "comparison".equalsIgnoreCase(
-                                (String) state.data().getOrDefault(StateKeys.CATEGORY, ""))
-                        || "aggregation".equalsIgnoreCase(
-                                (String) state.data().getOrDefault(StateKeys.CATEGORY, ""))
-                                ? "query_decompose" : "prompt_route"),
-                Map.of("query_decompose", "query_decompose", "prompt_route", "prompt_route"));
+                        resolveIntentBranch(state.data())),
+                Map.of("escalation", "escalation",
+                        "mcp_tool_call", "mcp_tool_call",
+                        "query_decompose", "query_decompose",
+                        "prompt_route", "prompt_route"));
 
+        // 转人工 → END
+        stateGraph.addEdge("escalation", END);
+        // MCP工具调用 → END
+        stateGraph.addEdge("mcp_tool_call", END);
+        // 拆解 → prompt_route
         stateGraph.addEdge("query_decompose", "prompt_route");
 
-        // 条件边：chitchat 不需要检索，直接跳到 llm_generate
+        // 条件边：prompt_route → 跳过检索则直接LLM，否则走检索
         stateGraph.addConditionalEdges("prompt_route",
                 state -> java.util.concurrent.CompletableFuture.completedFuture(
                         isSkipRetrieval((String) state.data().getOrDefault(StateKeys.CATEGORY, ""))
@@ -175,6 +195,52 @@ public class RagGraphAgent {
         stateGraph.addEdge("retrieval", "context_build");
         stateGraph.addEdge("context_build", "llm_generate");
         stateGraph.addEdge("llm_generate", END);
+    }
+
+    /**
+     * 根据 category + emotion 判断 intent_classify 后的分支走向
+     */
+    private static String resolveIntentBranch(Map<String, Object> state) {
+        String category = (String) state.getOrDefault(StateKeys.CATEGORY, "");
+        String emotion = (String) state.getOrDefault(StateKeys.EMOTION, "neutral");
+        Object questionObj = state.getOrDefault(StateKeys.QUESTION, "");
+        String question = questionObj != null ? questionObj.toString().trim() : "";
+
+        // ① 情绪负面 或 用户明确要求转人工
+        if ("negative".equalsIgnoreCase(emotion)
+                || "escalation".equalsIgnoreCase(category)) {
+            return "escalation";
+        }
+
+        // ② 操作类：判断是确认执行还是新请求
+        if ("operation".equalsIgnoreCase(category)) {
+            if (isConfirmMessage(question)) {
+                return "mcp_tool_call";
+            }
+            return "prompt_route";
+        }
+
+        // ③ 对比/汇总 → 拆解
+        if ("comparison".equalsIgnoreCase(category)
+                || "aggregation".equalsIgnoreCase(category)) {
+            return "query_decompose";
+        }
+
+        // ④ 默认直连模板路由
+        return "prompt_route";
+    }
+
+    /** 判断用户消息是否为确认执行（"是""确认""执行"等简短确认词） */
+    private static boolean isConfirmMessage(String question) {
+        if (question == null || question.isEmpty()) return false;
+        String q = question.trim();
+        // 简短的确认类消息（防止误判）
+        if (q.length() > 10) return false;
+        return q.equals("是") || q.equals("确认") || q.equals("执行")
+                || q.equals("好") || q.equals("行") || q.equals("可以")
+                || q.equals("对") || q.equals("好的") || q.equals("是的")
+                || q.equals("嗯") || q.equals("对的对的") || q.equals("ok")
+                || q.equals("OK") || q.equals("行吧");
     }
 
     /** 通用节点注册：同步Node → AsyncNodeAction + stepType写入 */
@@ -195,6 +261,8 @@ public class RagGraphAgent {
         else if (node instanceof ContextBuildNode) fn = ((ContextBuildNode) node)::apply;
         else if (node instanceof LLMGenerateNode) fn = ((LLMGenerateNode) node)::apply;
         else if (node instanceof QueryDecomposeNode) fn = ((QueryDecomposeNode) node)::apply;
+        else if (node instanceof EscalationNode) fn = ((EscalationNode) node)::apply;
+        else if (node instanceof McpToolCallNode) fn = ((McpToolCallNode) node)::apply;
         else throw new IllegalArgumentException("Unsupported node type: " + node.getClass());
 
         graph.addNode(name, (OverAllState state, RunnableConfig config) -> {

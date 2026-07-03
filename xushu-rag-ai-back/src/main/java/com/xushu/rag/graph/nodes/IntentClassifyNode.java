@@ -56,12 +56,13 @@ public class IntentClassifyNode {
             category = "aggregation";
         }
 
-        log.info("[IntentClassify] question='{}', category={}, layer={}, tokenUsed={}",
+        log.info("[IntentClassify] question='{}', category={}, layer={}, tokenUsed={}, emotion={}",
                 question.length() > 40 ? question.substring(0, 40) + "..." : question,
-                category, result.getLayer(), result.getTokenUsed());
+                category, result.getLayer(), result.getTokenUsed(), result.getEmotion());
 
         return Map.of(
                 StateKeys.CATEGORY, category,
+                StateKeys.EMOTION, result.getEmotion(),
                 StateKeys.STEPS, "意图分类完成: " + category + " (" + result.getLayer() + ")"
         );
     }

@@ -61,6 +61,39 @@ class StructuredOutputConverterTest {
         assertThrows(Exception.class, () -> converter.convert("not json at all"));
     }
 
+    @Test
+    @DisplayName("IntentClassification: 含emotion字段的JSON解析")
+    void intentClassification_convert_shouldParseEmotion() {
+        BeanOutputConverter<IntentClassification> converter =
+                new BeanOutputConverter<>(IntentClassification.class);
+
+        String llmResponse = """
+                {"intent":"reference","reason":"用户查询制度","confidence":0.88,"emotion":"neutral"}""";
+
+        IntentClassification result = converter.convert(llmResponse);
+
+        assertNotNull(result);
+        assertEquals("reference", result.intent());
+        assertEquals("neutral", result.emotion());
+    }
+
+    @Test
+    @DisplayName("IntentClassification: emotion字段缺失时默认为neutral")
+    void intentClassification_convert_shouldDefaultEmotion() {
+        BeanOutputConverter<IntentClassification> converter =
+                new BeanOutputConverter<>(IntentClassification.class);
+
+        // 旧版LLM响应不含emotion
+        String llmResponse = """
+                {"intent":"calculation","reason":"计算补偿","confidence":0.9}""";
+
+        IntentClassification result = converter.convert(llmResponse);
+
+        assertNotNull(result);
+        // emotion缺失时应为null，调用方兜底为neutral
+        assertNull(result.emotion());
+    }
+
     // ==================== ScoreItem ====================
 
     @Test

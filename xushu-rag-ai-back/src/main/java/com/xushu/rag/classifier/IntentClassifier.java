@@ -18,6 +18,8 @@ public interface IntentClassifier {
         REFERENCE("reference"),
         /** 操作类 */
         OPERATION("operation"),
+        /** 转人工 */
+        ESCALATION("escalation"),
         /** 闲聊 */
         CHITCHAT("chitchat"),
         /** 未知 */
@@ -51,11 +53,17 @@ public interface IntentClassifier {
         private final Category category;
         private final String layer; // L1 或 L2
         private final int tokenUsed;
+        private final String emotion; // positive/neutral/negative, L1默认neutral
 
         public ClassifyResult(Category category, String layer, int tokenUsed) {
+            this(category, layer, tokenUsed, "neutral");
+        }
+
+        public ClassifyResult(Category category, String layer, int tokenUsed, String emotion) {
             this.category = category;
             this.layer = layer;
             this.tokenUsed = tokenUsed;
+            this.emotion = emotion;
         }
 
         public Category getCategory() {
@@ -70,9 +78,13 @@ public interface IntentClassifier {
             return tokenUsed;
         }
 
+        public String getEmotion() {
+            return emotion;
+        }
+
         @Override
         public String toString() {
-            return "ClassifyResult{category=" + category + ", layer=" + layer + ", tokenUsed=" + tokenUsed + "}";
+            return "ClassifyResult{category=" + category + ", layer=" + layer + ", tokenUsed=" + tokenUsed + ", emotion=" + emotion + "}";
         }
     }
 

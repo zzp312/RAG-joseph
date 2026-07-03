@@ -54,7 +54,8 @@ export const getStreamChat = (
     onClose: ResultCallBack,
     sources?: string[],
     kbIds?: number[],
-    sessionId?: string
+    sessionId?: string,
+    escalate?: boolean
 ) => {
     const ctrl = new AbortController();
     
@@ -72,6 +73,9 @@ export const getStreamChat = (
     }
     if (sessionId) {
         formData.append('sessionId', sessionId);
+    }
+    if (escalate) {
+        formData.append('escalate', 'true');
     }
     
     fetchEventSource(service.defaults.baseURL + url, {
