@@ -163,6 +163,8 @@ CREATE TABLE `prompt_template` (
                                    `kb_id` BIGINT COMMENT '知识库ID（NULL表示全局模板）',
                                    `name` VARCHAR(255) NOT NULL COMMENT '模板名称',
                                    `template_content` TEXT NOT NULL COMMENT '模板内容',
+                                   `description` VARCHAR(500) COMMENT '模板描述（用于意图分类语义匹配）',
+                                   `template_type` VARCHAR(50) DEFAULT 'default' COMMENT '模板类型：calculation/reference/operation/chitchat/default',
                                    `variables` JSON COMMENT '支持的变量列表',
                                    `status` VARCHAR(50) DEFAULT 'ACTIVE' COMMENT '状态：ACTIVE-启用，INACTIVE-禁用',
                                    `is_default` TINYINT(1) DEFAULT 0 COMMENT '是否默认模板：0-否，1-是',
@@ -174,10 +176,46 @@ CREATE TABLE `prompt_template` (
 
 
 -- ----------------------------
+-- Table structure for mcp_server_config
+-- （替代原 mcp_tool_registry，工具由MCP Server自动暴露，无需手动注册）
+-- ----------------------------
+DROP TABLE IF EXISTS `mcp_server_config`;
+CREATE TABLE `mcp_server_config` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+    `server_name` VARCHAR(255) NOT NULL COMMENT 'MCP服务名称（如：amap-maps、ziniu-local-server）',
+    `description` VARCHAR(500) COMMENT '描述（用于提示词工具推荐，如：高德地图服务：地理编码+路线规划）',
+    `server_category` VARCHAR(50) DEFAULT 'reference' COMMENT '服务分类：reference/operation/calculation',
+    `config_json` JSON COMMENT 'MCP连接配置JSON（stdio: command+args+env / http: url+type）',
+    `disabled` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否禁用：0-启用，1-禁用',
+    `enabled` TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用：0-禁用，1-启用',
+    `create_time` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_server_name` (`server_name`),
+    INDEX `idx_enabled` (`enabled`),
+    INDEX `idx_category` (`server_category`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='MCP服务器配置表';
+
+
+-- ----------------------------
 -- Insert default data
 -- ----------------------------
 INSERT INTO `knowledge_base` (`id`, `name`, `description`, `parent_id`, `status`, `create_time`, `update_time`)
 VALUES (1, '通用知识库', '默认通用知识库，存放未分类文档', NULL, 'ACTIVE', NOW(), NOW());
 
-INSERT INTO `prompt_template` (`id`, `kb_id`, `name`, `template_content`, `variables`, `status`, `is_default`, `create_time`, `update_time`)
-VALUES (1, NULL, '通用模板', '你是{kb_name}知识库的智能助手，请根据以下上下文回答问题：\n\n上下文：{context}\n\n问题：{question}\n\n请仅基于上下文回答，不要引入外部知识。', '[\"context\", \"question\", \"kb_name\"]', 'ACTIVE', 1, NOW(), NOW());
+INSERT INTO `prompt_template` (`id`, `kb_id`, `name`, `template_content`, `description`, `template_type`, `variables`, `status`, `is_default`, `create_time`, `update_time`)
+VALUES (1, NULL, '通用模板', '你是{kb_name}知识库的智能助手，请根据以下上下文回答问题：\n\n上下文：{context}\n\n问题：{question}\n\n请仅基于上下文回答，不要引入外部知识。', '默认模板，用于知识检索类问答', 'default', '[\"context\", \"question\", \"kb_name\"]', 'ACTIVE', 1, NOW(), NOW());
+
+INSERT INTO `prompt_template` (`kb_id`, `name`, `template_content`, `description`, `template_type`, `variables`, `status`, `is_default`, `create_time`, `update_time`)
+VALUES (NULL, '操作执行模板', '你是操作助手，请根据用户的要求判断需要执行什么操作。\n\n如果用户尚未明确确认执行，请描述操作详情和所需参数，在回答末尾征求用户确认。\n如果用户已确认（如回复\"是\"\"确定\"\"执行\"），请直接整理操作参数。\n\n用户请求：{question}', '用于执行操作类任务，如信息查询、合同签署、流程办理等', 'operation', '[\"question\"]', 'ACTIVE', 1, NOW(), NOW());
+
+-- MCP Server 示例数据
+-- 高德地图（stdio模式，Windows需cmd /c 包裹）
+INSERT INTO `mcp_server_config` (`server_name`, `description`, `server_category`, `config_json`, `disabled`)
+VALUES ('amap-maps', '高德地图服务：支持地理编码、路线规划、周边搜索', 'reference',
+        '{"command":"cmd","args":["/c","npx","-y","@amap/amap-maps-mcp-server"],"env":{"AMAP_MAPS_API_KEY":"your_key_here"}}', 0);
+
+-- 紫牛本地业务服务（HTTP模式）
+INSERT INTO `mcp_server_config` (`server_name`, `description`, `server_category`, `config_json`, `disabled`)
+VALUES ('ziniu-local-server', '紫牛业务系统：支持公积金查询、员工信息查询、流程办理', 'operation',
+        '{"url":"http://localhost:8081","type":"http"}', 0);

@@ -5,13 +5,33 @@ export const ChatApi = {
   Chat: "/chat/stream",
   RagChat: "/ai/rag",
   RagWithKb: "/ai/rag-with-kb",
+  RagGraph: "/chat/rag-graph",  // Graph Agent 工作流模式
 };
 
 // 聊天消息接口
 export interface ChatMessage {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system' | 'divider';
   content: string;
   isTyping?: boolean;
+  /** 分界线类型（仅 divider 消息使用） */
+  dividerType?: 'human_start' | 'human_end';
+  /** 工作流步骤列表（内联展示，仅assistant消息使用） */
+  steps?: Array<{
+    type: 'thinking' | 'tool' | 'error';
+    content: string;
+    timestamp: number;
+    durationMs?: number;
+  }>;
+  /** 步骤块是否折叠 */
+  stepsCollapsed?: boolean;
+  /** 本轮步骤是否全部完成 */
+  stepsCompleted?: boolean;
+  /** 本轮总耗时（毫秒） */
+  totalDurationMs?: number;
+  /** 后端 SSE 攒批时的 fallback 占位是否可见(后端长时间不发新 step 时为 true) */
+  fallbackVisible?: boolean;
+  /** fallback 占位展示文本,如 "正在执行 检索..." */
+  fallbackText?: string | null;
 }
 
 // 发送消息接口 (传统fetch方式)

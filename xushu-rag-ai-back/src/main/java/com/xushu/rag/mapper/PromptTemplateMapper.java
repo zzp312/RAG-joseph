@@ -22,4 +22,20 @@ public interface PromptTemplateMapper extends BaseMapper<PromptTemplate> {
 
     @Select("SELECT * FROM prompt_template WHERE kb_id = #{kbId} AND is_default = 1 AND status = 'ACTIVE'")
     PromptTemplate selectDefaultByKbId(@Param("kbId") Long kbId);
+
+    /**
+     * 按类型和知识库ID查询模板（Graph Agent PromptRouteNode 调用）
+     *
+     * @author Joseph
+     */
+    @Select("SELECT * FROM prompt_template WHERE template_type = #{templateType} AND kb_id = #{kbId} AND status = 'ACTIVE' LIMIT 1")
+    PromptTemplate selectByTypeAndKbId(@Param("templateType") String templateType, @Param("kbId") Long kbId);
+
+    /**
+     * 按类型查询全局默认模板（无kb_id绑定）
+     *
+     * @author Joseph
+     */
+    @Select("SELECT * FROM prompt_template WHERE template_type = #{templateType} AND kb_id IS NULL AND status = 'ACTIVE' LIMIT 1")
+    PromptTemplate selectDefaultByType(@Param("templateType") String templateType);
 }

@@ -12,7 +12,7 @@
 <!--        <el-icon size="50">-->
 <!--          <el-image :src="Logo"></el-image>-->
 <!--        </el-icon>-->
-        <h1>XS-RAG-AI</h1>
+        <h1>周周-RAG-AI</h1>
         <el-text style="color: #bfcbd9" size="small">知识库AI问答系统</el-text>
       </div>
       <el-divider />

@@ -177,6 +177,32 @@ public class PromptTemplateServiceImpl extends ServiceImpl<PromptTemplateMapper,
                 .replace("{kb_name}", kbName);
     }
 
+    /**
+     * 按分类和知识库ID查找模板（Graph Agent PromptRouteNode 调用）
+     * <p>匹配优先级：category+kbId精准匹配 → kbId默认模板 → 全局默认模板</p>
+     *
+     * @author Joseph
+     */
+    @Override
+    public PromptTemplate findByCategoryAndKbId(String category, Long kbId) {
+        // 1. 精准匹配：template_type = category + kb_id = kbId
+        PromptTemplate template = promptTemplateMapper.selectByTypeAndKbId(category, kbId);
+        if (template != null) {
+            return template;
+        }
+
+        // 2. 兜底：kbId 下的默认模板
+        if (kbId != null) {
+            template = promptTemplateMapper.selectDefaultByKbId(kbId);
+            if (template != null) {
+                return template;
+            }
+        }
+
+        // 3. 全局默认模板
+        return promptTemplateMapper.selectDefaultByType("default");
+    }
+
     private List<String> extractVariables(String templateContent) {
         List<String> variables = new ArrayList<>();
         int start = 0;

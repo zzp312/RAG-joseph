@@ -2,6 +2,7 @@ HELP.md
 target/
 .mvn/
 openspec/
+app/xushu-rag-ai-front/dist
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/

@@ -53,7 +53,9 @@ export const getStreamChat = (
     onError: ResultCallBack,
     onClose: ResultCallBack,
     sources?: string[],
-    kbIds?: number[]
+    kbIds?: number[],
+    sessionId?: string,
+    escalate?: boolean
 ) => {
     const ctrl = new AbortController();
     
@@ -68,6 +70,12 @@ export const getStreamChat = (
         kbIds.forEach(kbId => {
             formData.append('kbIds', kbId.toString());
         });
+    }
+    if (sessionId) {
+        formData.append('sessionId', sessionId);
+    }
+    if (escalate) {
+        formData.append('escalate', 'true');
     }
     
     fetchEventSource(service.defaults.baseURL + url, {
