@@ -64,11 +64,17 @@ public final class StateKeys {
     /** MCP工具调用结果（Mock阶段为固定文案） */
     public static final String MCP_RESULT = "mcpResult";
 
+    /** 用户是否确认调用工具（operation类意图时由IntentClassifyNode写入） */
+    public static final String TOOL_CONFIRM = "toolConfirm";
+
     /** 累计Token使用（各Node自行累加，用于预算校验） */
     public static final String TOKEN_USAGE = "tokenUsage";
 
     /** 拆解后的子问题列表（QueryDecomposeNode 产出） */
     public static final String SUB_QUERIES = "subQueries";
+
+    /** 目标MCP服务名（IntentClassifyNode写入，McpToolCallNode读取，用于精准调用指定服务） */
+    public static final String TARGET_MCP_SERVER = "targetMcpServer";
 
     /**
      * 客户端取消标志（AtomicBoolean）

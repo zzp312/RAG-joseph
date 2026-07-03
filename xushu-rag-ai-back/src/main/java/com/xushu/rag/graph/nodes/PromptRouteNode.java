@@ -1,9 +1,9 @@
 package com.xushu.rag.graph.nodes;
 
-import com.xushu.rag.entity.McpToolRegistry;
+import com.xushu.rag.entity.McpServerConfig;
 import com.xushu.rag.entity.PromptTemplate;
 import com.xushu.rag.graph.StateKeys;
-import com.xushu.rag.mapper.McpToolRegistryMapper;
+import com.xushu.rag.mapper.McpServerConfigMapper;
 import com.xushu.rag.service.PromptTemplateService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -15,7 +15,7 @@ import java.util.Map;
 /**
  * 提示词路由Node
  * <p>根据意图类别 category 选择对应的提示词模板，注入 {context} 占位符</p>
- * <p>检索类意图追加工具推荐列表，LLM 自主判断是否推荐</p>
+ * <p>检索类意图追加MCP服务推荐列表，LLM 自主判断是否推荐</p>
  *
  * @author Joseph
  */
@@ -24,19 +24,22 @@ import java.util.Map;
 public class PromptRouteNode {
 
     private final PromptTemplateService promptTemplateService;
-    private final McpToolRegistryMapper mcpToolRegistryMapper;
+    private final McpServerConfigMapper mcpServerConfigMapper;
 
     @Value("${mcp.tools.suggest.enabled:false}")
     private boolean mcpSuggestEnabled;
 
-    /** 启用工具推荐的意图类别（闲聊类、转人工类不推荐） */
-    private static final java.util.Set<String> SUGGEST_CATEGORIES =
-            java.util.Set.of("calculation", "reference");
+    /**
+     * 不推荐工具的意图类别（转人工直接转人工，无需推荐）
+     * 其他所有类别都尝试注入工具推荐，由 LLM 判断是否相关
+     */
+    private static final java.util.Set<String> SKIP_SUGGEST_CATEGORIES =
+            java.util.Set.of("escalation");
 
     public PromptRouteNode(PromptTemplateService promptTemplateService,
-                           McpToolRegistryMapper mcpToolRegistryMapper) {
+                           McpServerConfigMapper mcpServerConfigMapper) {
         this.promptTemplateService = promptTemplateService;
-        this.mcpToolRegistryMapper = mcpToolRegistryMapper;
+        this.mcpServerConfigMapper = mcpServerConfigMapper;
     }
 
     public Map<String, Object> apply(Map<String, Object> state) {
@@ -71,9 +74,9 @@ public class PromptRouteNode {
             systemPrompt = systemPrompt + appendix;
         }
 
-        // 工具智能推荐：检索类意图追加可用工具列表
-        if (mcpSuggestEnabled && SUGGEST_CATEGORIES.contains(category)) {
-            String toolHint = buildToolSuggestion(category);
+        // 工具智能推荐：全量查询启用工具，由 LLM 判断是否推荐
+        if (mcpSuggestEnabled && !SKIP_SUGGEST_CATEGORIES.contains(category)) {
+            String toolHint = buildToolSuggestion();
             if (toolHint != null) {
                 systemPrompt = systemPrompt + toolHint;
             }
@@ -88,28 +91,37 @@ public class PromptRouteNode {
     }
 
     /**
-     * 构建工具推荐提示（仅对检索类意图注入，limit 3，≤100 token）
+     * 构建工具推荐提示（全量查询启用工具，由 LLM 判断是否推荐）
+     * <p>提示词中要求 LLM 明确告知入参，提升用户体验</p>
      *
-     * @param category 意图分类
-     * @return 工具推荐文案，无可用工具时返回 null
+     * @return 工具推荐文案，无可用服务时返回 null
      */
-    private String buildToolSuggestion(String category) {
-        List<McpToolRegistry> tools = mcpToolRegistryMapper.selectByToolCategory(category);
-        if (tools == null || tools.isEmpty()) {
+    private String buildToolSuggestion() {
+        List<McpServerConfig> configs = mcpServerConfigMapper.selectAllEnabled();
+        if (configs == null || configs.isEmpty()) {
             return null;
         }
 
-        StringBuilder sb = new StringBuilder("\n\n【可用工具】");
-        for (McpToolRegistry tool : tools) {
-            String desc = tool.getDescription() != null && tool.getDescription().length() > 20
-                    ? tool.getDescription().substring(0, 20) + "..."
-                    : (tool.getDescription() != null ? tool.getDescription() : "");
-            sb.append("\n- ").append(tool.getToolName()).append(": ").append(desc);
+        StringBuilder sb = new StringBuilder("\n\n【可用服务】");
+        for (McpServerConfig config : configs) {
+            String desc = config.getDescription() != null && config.getDescription().length() > 50
+                    ? config.getDescription().substring(0, 50) + "..."
+                    : (config.getDescription() != null ? config.getDescription() : "");
+            sb.append("\n- ").append(config.getServerName()).append(": ").append(desc);
         }
-        sb.append("\n如果对用户有帮助，请在回答中主动询问是否调用。");
+        sb.append("\n\n请根据用户问题判断是否需要推荐上述服务。如果需要推荐，请按以下格式回复：");
+        sb.append("\n1. 明确告知用户：将会调用哪个服务（说名字）");
+        sb.append("\n2. 告知用户：该服务需要哪些参数（必填项必须列出）");
+        sb.append("\n3. 询问用户：是否确认执行，以及是否需要补充参数");
+        sb.append("\n\n示例：");
+        sb.append("\n「我可以帮您调用高德地图查询路线。需要您提供：起点位置、终点位置。请问起点和终点分别是？」");
+        sb.append("\n\n注意：");
+        sb.append("\n- 仅推荐与用户需求相关的服务，不相关的不要提及");
+        sb.append("\n- 如果用户消息中已包含部分参数，请告知用户还缺什么");
+        sb.append("\n- 不要在本次回复中直接执行工具，等用户确认后再执行");
 
-        log.info("[PromptRoute] 注入工具推荐, category={}, tools={}", category,
-                tools.stream().map(McpToolRegistry::getToolName).toList());
+        log.info("[PromptRoute] 注入服务推荐, services={}",
+                configs.stream().map(McpServerConfig::getServerName).toList());
         return sb.toString();
     }
 }

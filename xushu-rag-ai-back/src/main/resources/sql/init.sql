@@ -176,23 +176,25 @@ CREATE TABLE `prompt_template` (
 
 
 -- ----------------------------
--- Table structure for mcp_tool_registry
+-- Table structure for mcp_server_config
+-- （替代原 mcp_tool_registry，工具由MCP Server自动暴露，无需手动注册）
 -- ----------------------------
-DROP TABLE IF EXISTS `mcp_tool_registry`;
-CREATE TABLE `mcp_tool_registry` (
+DROP TABLE IF EXISTS `mcp_server_config`;
+CREATE TABLE `mcp_server_config` (
     `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
-    `tool_name` VARCHAR(255) NOT NULL COMMENT '工具名称（如：员工信息查询、发送企微通知）',
-    `description` VARCHAR(500) COMMENT '工具描述（AI根据描述判断何时调用，20字以内）',
-    `tool_category` VARCHAR(50) DEFAULT 'default' COMMENT '工具分类：calculation/reference/operation/default',
-    `endpoint` VARCHAR(500) COMMENT 'MCP Server端点URL（真实对接时填写）',
-    `risk_level` VARCHAR(20) NOT NULL DEFAULT 'MEDIUM' COMMENT '风险等级：LOW/MEDIUM/HIGH',
+    `server_name` VARCHAR(255) NOT NULL COMMENT 'MCP服务名称（如：amap-maps、ziniu-local-server）',
+    `description` VARCHAR(500) COMMENT '描述（用于提示词工具推荐，如：高德地图服务：地理编码+路线规划）',
+    `server_category` VARCHAR(50) DEFAULT 'reference' COMMENT '服务分类：reference/operation/calculation',
+    `config_json` JSON COMMENT 'MCP连接配置JSON（stdio: command+args+env / http: url+type）',
+    `disabled` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否禁用：0-启用，1-禁用',
     `enabled` TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用：0-禁用，1-启用',
     `create_time` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     `update_time` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_server_name` (`server_name`),
     INDEX `idx_enabled` (`enabled`),
-    INDEX `idx_tool_category` (`tool_category`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='MCP工具注册表';
+    INDEX `idx_category` (`server_category`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='MCP服务器配置表';
 
 
 -- ----------------------------
@@ -206,3 +208,14 @@ VALUES (1, NULL, '通用模板', '你是{kb_name}知识库的智能助手，请�
 
 INSERT INTO `prompt_template` (`kb_id`, `name`, `template_content`, `description`, `template_type`, `variables`, `status`, `is_default`, `create_time`, `update_time`)
 VALUES (NULL, '操作执行模板', '你是操作助手，请根据用户的要求判断需要执行什么操作。\n\n如果用户尚未明确确认执行，请描述操作详情和所需参数，在回答末尾征求用户确认。\n如果用户已确认（如回复\"是\"\"确定\"\"执行\"），请直接整理操作参数。\n\n用户请求：{question}', '用于执行操作类任务，如信息查询、合同签署、流程办理等', 'operation', '[\"question\"]', 'ACTIVE', 1, NOW(), NOW());
+
+-- MCP Server 示例数据
+-- 高德地图（stdio模式，Windows需cmd /c 包裹）
+INSERT INTO `mcp_server_config` (`server_name`, `description`, `server_category`, `config_json`, `disabled`)
+VALUES ('amap-maps', '高德地图服务：支持地理编码、路线规划、周边搜索', 'reference',
+        '{"command":"cmd","args":["/c","npx","-y","@amap/amap-maps-mcp-server"],"env":{"AMAP_MAPS_API_KEY":"your_key_here"}}', 0);
+
+-- 紫牛本地业务服务（HTTP模式）
+INSERT INTO `mcp_server_config` (`server_name`, `description`, `server_category`, `config_json`, `disabled`)
+VALUES ('ziniu-local-server', '紫牛业务系统：支持公积金查询、员工信息查询、流程办理', 'operation',
+        '{"url":"http://localhost:8081","type":"http"}', 0);

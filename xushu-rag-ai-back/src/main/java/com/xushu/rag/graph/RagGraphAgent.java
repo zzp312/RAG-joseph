@@ -138,7 +138,8 @@ public class RagGraphAgent {
             StateKeys.ANSWER, StateKeys.STEPS, StateKeys.STEP_TYPE,
             StateKeys.SUB_QUERIES,
             StateKeys.EMOTION, StateKeys.ESCALATE, StateKeys.MCP_RESULT, StateKeys.TOKEN_USAGE,
-            StateKeys.CANCELLED
+            StateKeys.CANCELLED, StateKeys.TOOL_CONFIRM,
+            StateKeys.TARGET_MCP_SERVER
     };
 
     /** 注册所有节点（Phase 2在此追加新节点） */
@@ -198,13 +199,12 @@ public class RagGraphAgent {
     }
 
     /**
-     * 根据 category + emotion 判断 intent_classify 后的分支走向
+     * 根据 category + emotion + toolConfirm 判断 intent_classify 后的分支走向
      */
     private static String resolveIntentBranch(Map<String, Object> state) {
         String category = (String) state.getOrDefault(StateKeys.CATEGORY, "");
         String emotion = (String) state.getOrDefault(StateKeys.EMOTION, "neutral");
-        Object questionObj = state.getOrDefault(StateKeys.QUESTION, "");
-        String question = questionObj != null ? questionObj.toString().trim() : "";
+        Boolean toolConfirm = (Boolean) state.getOrDefault(StateKeys.TOOL_CONFIRM, false);
 
         // ① 情绪负面 或 用户明确要求转人工
         if ("negative".equalsIgnoreCase(emotion)
@@ -212,9 +212,9 @@ public class RagGraphAgent {
             return "escalation";
         }
 
-        // ② 操作类：判断是确认执行还是新请求
+        // ② 操作类：根据LLM判断的toolConfirm决定走向
         if ("operation".equalsIgnoreCase(category)) {
-            if (isConfirmMessage(question)) {
+            if (Boolean.TRUE.equals(toolConfirm)) {
                 return "mcp_tool_call";
             }
             return "prompt_route";
@@ -228,19 +228,6 @@ public class RagGraphAgent {
 
         // ④ 默认直连模板路由
         return "prompt_route";
-    }
-
-    /** 判断用户消息是否为确认执行（"是""确认""执行"等简短确认词） */
-    private static boolean isConfirmMessage(String question) {
-        if (question == null || question.isEmpty()) return false;
-        String q = question.trim();
-        // 简短的确认类消息（防止误判）
-        if (q.length() > 10) return false;
-        return q.equals("是") || q.equals("确认") || q.equals("执行")
-                || q.equals("好") || q.equals("行") || q.equals("可以")
-                || q.equals("对") || q.equals("好的") || q.equals("是的")
-                || q.equals("嗯") || q.equals("对的对的") || q.equals("ok")
-                || q.equals("OK") || q.equals("行吧");
     }
 
     /** 通用节点注册：同步Node → AsyncNodeAction + stepType写入 */

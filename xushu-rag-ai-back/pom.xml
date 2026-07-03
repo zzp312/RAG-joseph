@@ -177,6 +177,33 @@
             <version>1.0.0-M1</version>
         </dependency>
 
+        <!-- Spring AI MCP Client: 动态接入MCP Server（高德地图等） -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-mcp-client</artifactId>
+            <exclusions>
+                <!-- 排除旧版 mcp-core 0.14.0，改用 0.15.0 修复 Streamable HTTP 405 问题 -->
+                <exclusion>
+                    <groupId>io.modelcontextprotocol.sdk</groupId>
+                    <artifactId>mcp-core</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>io.modelcontextprotocol.sdk</groupId>
+                    <artifactId>mcp-spring-webflux</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>io.modelcontextprotocol.sdk</groupId>
+                    <artifactId>mcp-spring-webmvc</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <!-- 显式引入 mcp-core 0.16.0，修复 HttpClientStreamableHttpTransport 初始化时尝试 SSE 导致 405 的问题 -->
+        <dependency>
+            <groupId>io.modelcontextprotocol.sdk</groupId>
+            <artifactId>mcp-core</artifactId>
+            <version>0.16.0</version>
+        </dependency>
+
 
     </dependencies>
 

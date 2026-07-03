@@ -14,5 +14,17 @@ public record IntentClassification(
         /** 置信度 0~1 */
         double confidence,
         /** 用户情绪：positive / neutral / negative（旧版LLM可能不返回，调用方兜底neutral） */
-        String emotion
+        String emotion,
+        /**
+         * 用户是否确认调用工具（仅当intent=operation时有意义）
+         * true  = 用户明确说"好的""帮我查""执行""确认"等确认词
+         * false = 用户只是在询问/描述需求，尚未确认
+         */
+        Boolean toolConfirm,
+        /**
+         * 目标MCP服务名（仅当intent=operation且有明确目标服务时填写）
+         * 例如："amap-maps"（高德地图服务）、"ziniu-local-server"（紫牛本地服务）
+         * 无法判断或不需要调用MCP时为空字符串或null
+         */
+        String targetMcpServer
 ) {}
