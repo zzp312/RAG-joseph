@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * LLM生成Node
@@ -48,6 +49,16 @@ public class LLMGenerateNode {
         String context = (String) state.getOrDefault(StateKeys.CONTEXT, "");
         String question = (String) state.getOrDefault(StateKeys.QUESTION, "");
         String conversationId = (String) state.getOrDefault(StateKeys.CONVERSATION_ID, "default");
+
+        // 调用 LLM 前检查客户端是否已断开，避免最耗时的 LLM 调用继续执行
+        AtomicBoolean cancelled = (AtomicBoolean) state.getOrDefault(StateKeys.CANCELLED, null);
+        if (cancelled != null && cancelled.get()) {
+            log.warn("[LLMGenerate] 客户端已断开，跳过 LLM 调用, conversationId={}", conversationId);
+            return Map.of(
+                    StateKeys.ANSWER, "客户端已断开连接，回答已取消。",
+                    StateKeys.STEPS, "LLM 调用已跳过（客户端断开）"
+            );
+        }
 
         // 系统提示词中不再注入文档上下文，替换 {context} 为空
         // 文档上下文改为注入到用户消息中（对标 MetadataAwareQuestionAnswerAdvisor 格式），

@@ -38,16 +38,19 @@
                     <span class="step-content">{{ message.fallbackText }}</span>
                   </div>
                 </div>
-                <div v-if="message.stepsCompleted" class="step-summary">
-                  <el-icon class="summary-icon"><CircleCheckFilled /></el-icon>
-                  运行完毕 {{ formatDuration(message.totalDurationMs || 0) }}
-                </div>
               </div>
             </div>
 
             <!-- 答案内容：直接展示，无打字机效果 -->
             <div class="message-content"
                  v-html="renderMarkdown(message.content)">
+            </div>
+
+            <!-- 总耗时（含LLM生成时间），展示在答案气泡底部 -->
+            <div v-if="message.stepsCompleted && message.totalDurationMs"
+                 class="answer-footer-time">
+              <el-icon class="time-icon"><CircleCheckFilled /></el-icon>
+              <span>耗时 {{ formatDuration(message.totalDurationMs) }}</span>
             </div>
 
             <el-button
@@ -653,20 +656,20 @@ onMounted(() => {
   font-family: Consolas, Monaco, monospace;
 }
 
-.step-summary {
+/* ===== 答案气泡底部耗时 ===== */
+.answer-footer-time {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin-top: 6px;
-  padding: 3px 10px;
-  background: #f0f9eb;
-  color: #67c23a;
-  border-radius: 4px;
+  margin-top: 4px;
+  padding: 2px 8px;
+  color: #909399;
   font-size: 12px;
-  font-weight: 500;
+  font-family: Consolas, Monaco, monospace;
 
-  .summary-icon {
+  .time-icon {
     font-size: 12px;
+    color: #67c23a;
   }
 }
 

@@ -70,6 +70,13 @@ public final class StateKeys {
     /** 拆解后的子问题列表（QueryDecomposeNode 产出） */
     public static final String SUB_QUERIES = "subQueries";
 
+    /**
+     * 客户端取消标志（AtomicBoolean）
+     * <p>由 GraphChatController 在 SSE doOnCancel 中置为 true，
+     * 各节点在耗时操作前检查此标志，提前短路返回，避免客户端断开后继续消耗算力</p>
+     */
+    public static final String CANCELLED = "__cancelled__";
+
     /** SSE步骤类型常量 */
     public static final class StepType {
         /** 思考中（意图分类、生成中） */

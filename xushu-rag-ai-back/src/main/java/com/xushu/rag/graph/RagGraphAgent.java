@@ -12,12 +12,14 @@ import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
 import com.xushu.rag.graph.nodes.*;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Sinks;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ThreadPoolExecutor;
 
 import static com.alibaba.cloud.ai.graph.StateGraph.END;
 import static com.alibaba.cloud.ai.graph.StateGraph.START;
@@ -44,6 +46,8 @@ public class RagGraphAgent {
     private final LLMGenerateNode llmGenerateNode;
     private final QueryDecomposeNode queryDecomposeNode;
     private final ChatModel chatModel;
+    /** SSE 回调专用线程池，避免回调阻塞 Graph 节点链路 */
+    private final ThreadPoolExecutor graphCallbackExecutor;
 
     public RagGraphAgent(QuestionInputNode questionInputNode,
                          IntentClassifyNode intentClassifyNode,
@@ -52,7 +56,8 @@ public class RagGraphAgent {
                          ContextBuildNode contextBuildNode,
                          LLMGenerateNode llmGenerateNode,
                          QueryDecomposeNode queryDecomposeNode,
-                         ChatModel chatModel) {
+                         ChatModel chatModel,
+                         @Qualifier("graphCallbackExecutor") ThreadPoolExecutor graphCallbackExecutor) {
         this.questionInputNode = questionInputNode;
         this.intentClassifyNode = intentClassifyNode;
         this.promptRouteNode = promptRouteNode;
@@ -61,6 +66,7 @@ public class RagGraphAgent {
         this.llmGenerateNode = llmGenerateNode;
         this.queryDecomposeNode = queryDecomposeNode;
         this.chatModel = chatModel;
+        this.graphCallbackExecutor = graphCallbackExecutor;
     }
 
     /**
@@ -121,7 +127,8 @@ public class RagGraphAgent {
             StateKeys.CONVERSATION_ID, StateKeys.DOCUMENTS, StateKeys.CONTEXT,
             StateKeys.ANSWER, StateKeys.STEPS, StateKeys.STEP_TYPE,
             StateKeys.SUB_QUERIES,
-            StateKeys.EMOTION, StateKeys.ESCALATE, StateKeys.MCP_RESULT, StateKeys.TOKEN_USAGE
+            StateKeys.EMOTION, StateKeys.ESCALATE, StateKeys.MCP_RESULT, StateKeys.TOKEN_USAGE,
+            StateKeys.CANCELLED
     };
 
     /** 注册所有节点（Phase 2在此追加新节点） */
@@ -193,21 +200,42 @@ public class RagGraphAgent {
         graph.addNode(name, (OverAllState state, RunnableConfig config) -> {
             try {
                 long start = System.currentTimeMillis();
+
+                // 节点开始前检查客户端是否已断开，断开则短路返回，避免继续消耗算力
+                java.util.concurrent.atomic.AtomicBoolean cancelledFlag =
+                        (java.util.concurrent.atomic.AtomicBoolean) state.data()
+                                .getOrDefault(StateKeys.CANCELLED, null);
+                if (cancelledFlag != null && cancelledFlag.get()) {
+                    log.warn("[Graph ✗] 节点跳过（客户端已断开）: {}", name);
+                    Map<String, Object> cancelledResult = new HashMap<>();
+                    cancelledResult.put(StateKeys.STEPS, "客户端已断开，节点跳过: " + name);
+                    cancelledResult.put(StateKeys.STEP_TYPE, StateKeys.StepType.ERROR);
+                    return CompletableFuture.completedFuture(cancelledResult);
+                }
+
                 log.info("[Graph ▶] 节点开始: {}", name);
                 Map<String, Object> result = new HashMap<>(fn.apply(state.data()));
                 result.putIfAbsent(StateKeys.STEP_TYPE, stepType);
                 // 统一兜底：确保每个节点都有 STEPS，避免节点完成时没有 step 事件发出
                 result.putIfAbsent(StateKeys.STEPS, "节点完成: " + name);
                 log.info("[Graph ✓] 节点完成: {} ({}ms)", name, System.currentTimeMillis() - start);
-                
+
                 // 节点完成时立即回调（用于实时 SSE 推送）
+                // 异步执行：避免 SSE 推送（含 backoff 背压等待）阻塞 Graph 节点链路
                 if (nodeCallback != null) {
-                    Map<String, Object> callbackData = new HashMap<>(result);
+                    final Map<String, Object> callbackData = new HashMap<>(result);
                     callbackData.put("nodeName", name);
                     callbackData.put("timestamp", System.currentTimeMillis());
-                    nodeCallback.accept(callbackData);
+                    CompletableFuture.runAsync(() -> {
+                        try {
+                            nodeCallback.accept(callbackData);
+                        } catch (Exception e) {
+                            log.error("[Graph回调] 异步执行失败, nodeName={}, err={}",
+                                    name, e.getMessage(), e);
+                        }
+                    }, graphCallbackExecutor);
                 }
-                
+
                 return CompletableFuture.completedFuture(result);
             } catch (Exception e) {
                 log.error("[Graph ✗] 节点失败: {}", name, e);
