@@ -3,7 +3,9 @@ package com.xushu.rag.graph.nodes;
 import com.xushu.rag.classifier.IntentClassifier;
 import com.xushu.rag.classifier.KeywordIntentClassifier;
 import com.xushu.rag.classifier.LLMIntentClassifier;
+import com.xushu.rag.entity.McpServerConfig;
 import com.xushu.rag.graph.StateKeys;
+import com.xushu.rag.mapper.McpServerConfigMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.Message;
@@ -12,6 +14,8 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 意图分类Node（两层漏斗：L1关键词 + L2 LLM）
@@ -32,13 +36,16 @@ public class IntentClassifyNode {
     private final KeywordIntentClassifier keywordClassifier;
     private final LLMIntentClassifier llmClassifier;
     private final ChatMemory chatMemory;
+    private final McpServerConfigMapper mcpServerConfigMapper;
 
     public IntentClassifyNode(KeywordIntentClassifier keywordClassifier,
                               LLMIntentClassifier llmClassifier,
-                              ChatMemory chatMemory) {
+                              ChatMemory chatMemory,
+                              McpServerConfigMapper mcpServerConfigMapper) {
         this.keywordClassifier = keywordClassifier;
         this.llmClassifier = llmClassifier;
         this.chatMemory = chatMemory;
+        this.mcpServerConfigMapper = mcpServerConfigMapper;
     }
 
     public Map<String, Object> apply(Map<String, Object> state) {
@@ -84,21 +91,115 @@ public class IntentClassifyNode {
             }
         }
 
+        // 覆写：operation 误判为 planning（隐患1修复）
+        // 当 LLM 把包含规划特征词的 query 误判为 operation 时，覆写回 planning
+        // 避免规划类问题被直接路由到 mcp_tool_call，跳过检索和规划
+        // 【已注释】暂不启用覆写，先依赖 intent-classify.st 中的优先级规则约束。
+        // 如需启用，取消下方 if 块的注释即可。
+        boolean finalToolConfirm = result.isToolConfirm();
+        // if (isOperation) {
+        //     if (q.contains("计划") || q.contains("方案") || q.contains("安排")
+        //             || q.contains("清单") || q.contains("规划")) {
+        //         category = "planning";
+        //         finalToolConfirm = false;
+        //         log.info("[IntentClassify] 覆写: operation → planning (query包含规划特征词, toolConfirm重置为false)");
+        //     }
+        // }
+
+        // 后校验：targetMcpServer 必须匹配真实启用的MCP服务名，否则纠偏或清空
+        String targetMcpServer = validateAndCorrectMcpServer(
+                result.getTargetMcpServer(), question);
+
         log.info("[IntentClassify] question='{}', category={}, layer={}, tokenUsed={}, emotion={}, toolConfirm={}, targetMcpServer={}, historyMsg={}",
                 question.length() > 40 ? question.substring(0, 40) + "..." : question,
                 category, result.getLayer(), result.getTokenUsed(), result.getEmotion(),
-                result.isToolConfirm(), result.getTargetMcpServer(), historyMessages.size());
+                finalToolConfirm, targetMcpServer, historyMessages.size());
 
         Map<String, Object> resultMap = new java.util.HashMap<>();
         resultMap.put(StateKeys.CATEGORY, category);
         resultMap.put(StateKeys.EMOTION, result.getEmotion());
-        resultMap.put(StateKeys.TOOL_CONFIRM, result.isToolConfirm());
+        resultMap.put(StateKeys.TOOL_CONFIRM, finalToolConfirm);
         resultMap.put(StateKeys.STEPS, "意图分类完成: " + category + " (" + result.getLayer() + ")");
-        // 写入目标MCP服务名（由LLM识别，用于McpToolCallNode精准调用）
-        if (result.getTargetMcpServer() != null && !result.getTargetMcpServer().isEmpty()) {
-            resultMap.put(StateKeys.TARGET_MCP_SERVER, result.getTargetMcpServer());
+        // 写入目标MCP服务名（已校验纠偏）
+        if (targetMcpServer != null && !targetMcpServer.isEmpty()) {
+            resultMap.put(StateKeys.TARGET_MCP_SERVER, targetMcpServer);
         }
         return resultMap;
+    }
+
+    /**
+     * 校验并纠偏 LLM 返回的 targetMcpServer
+     * <p>LLM 可能编造不存在的服务名（如 map-service），
+     * 此方法查询数据库中的真实启用服务列表进行校验。</p>
+     */
+    private String validateAndCorrectMcpServer(String llmServer, String question) {
+        if (llmServer == null || llmServer.trim().isEmpty()) {
+            return "";
+        }
+
+        // 查询真实启用的MCP服务名集合
+        Set<String> validNames;
+        try {
+            List<McpServerConfig> configs = mcpServerConfigMapper.selectAllEnabled();
+            if (configs == null || configs.isEmpty()) {
+                log.warn("[IntentClassify] 无可用MCP服务，清空 targetMcpServer");
+                return "";
+            }
+            validNames = configs.stream()
+                    .map(McpServerConfig::getServerName)
+                    .collect(Collectors.toSet());
+        } catch (Exception e) {
+            log.warn("[IntentClassify] 查询MCP服务列表失败，保留原始值: {}", e.getMessage());
+            return llmServer;
+        }
+
+        // 直接命中 → 通过
+        if (validNames.contains(llmServer)) {
+            return llmServer;
+        }
+
+        // 未命中：LLM编造的服务名，尝试关键词纠偏
+        log.warn("[IntentClassify] LLM返回了不存在的服务名 [{}]，尝试关键词纠偏", llmServer);
+
+        String corrected = correctByKeyword(llmServer, question, validNames);
+        if (corrected != null) {
+            log.info("[IntentClassify] 关键词纠偏成功: {} → {}", llmServer, corrected);
+            return corrected;
+        }
+
+        // 无法纠偏 → 清空，由 McpToolCallNode 的 matchServerByKeyword 兜底
+        log.warn("[IntentClassify] 无法纠偏，清空 targetMcpServer，交由 McpToolCallNode 关键词兜底");
+        return "";
+    }
+
+    /**
+     * 关键词纠偏：从LLM编造的服务名和用户问题中提取特征词，匹配真实服务名
+     */
+    private String correctByKeyword(String llmServer, String question, Set<String> validNames) {
+        String combined = (question + " " + llmServer).toLowerCase();
+
+        // 地图/路线/导航相关 → 匹配含 "map"/"amap"/"geo"/"高德" 的服务名
+        if (combined.matches(".*(地图|路线|导航|距离|多远|多久|开车|map|geo|amap|高德).*")) {
+            for (String name : validNames) {
+                String lower = name.toLowerCase();
+                if (lower.contains("map") || lower.contains("amap") || lower.contains("geo")
+                        || lower.contains("地图") || lower.contains("高德")) {
+                    return name;
+                }
+            }
+        }
+
+        // 考勤/HR/业务 → 匹配含 "local"/"ziniu"/"紫牛" 的服务名
+        if (combined.matches(".*(考勤|请假|入职|离职|薪资|工资|审批|ziniu|紫牛|local).*")) {
+            for (String name : validNames) {
+                String lower = name.toLowerCase();
+                if (lower.contains("local") || lower.contains("ziniu") || lower.contains("紫牛")) {
+                    return name;
+                }
+            }
+        }
+
+        return null;
     }
 
     /**

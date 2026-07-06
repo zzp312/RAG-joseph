@@ -65,8 +65,10 @@ public class PromptRouteNode {
             log.info("[PromptRoute] category={}, 使用默认模板", category);
         }
 
-        // RAG 规范附录：仅对检索类意图追加（operation/chitchat/escalation 不需要）
-        if (!"operation".equals(category) && !"chitchat".equals(category) && !"escalation".equals(category)) {
+        // RAG 规范附录：仅对检索类意图追加（operation/chitchat/escalation/planning 不需要）
+        // planning 模板内置了自己的工作规范，追加默认附录会冲突
+        if (!"operation".equals(category) && !"chitchat".equals(category)
+                && !"escalation".equals(category) && !"planning".equals(category)) {
             String appendix = "\n\n【回答规范】\n" +
                     "1. 图片：按指令输出Markdown图片语法 ![描述](URL)。\n" +
                     "2. 来源引用：仅当你引用了上下文中的具体信息时，才在末尾列出\"📚 参考来源\"，格式：`- 文件名 (版本xxx)`。如果回答是\"知识库中暂无相关内容\"，不要列出任何来源。\n" +

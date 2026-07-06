@@ -1,17 +1,26 @@
 package com.xushu.rag.classifier;
 
+import com.xushu.rag.entity.McpServerConfig;
+import com.xushu.rag.mapper.McpServerConfigMapper;
 import com.xushu.rag.structured.IntentClassification;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.converter.BeanOutputConverter;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StreamUtils;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 /**
  * L2 LLM 轻量意图分类（~200 token, 仅处理L1未命中的长尾请求）
  * <p>使用BeanOutputConverter实现结构化输出，要求LLM返回JSON后自动反序列化</p>
  * <p>fallback: 若结构化解析失败，回退到原有的trim+枚举关键词匹配</p>
+ * <p>分类提示词外置到 classpath:prompts/intent-classify.st，修改提示词无需改代码</p>
  *
  * @author Joseph
  */
@@ -19,49 +28,61 @@ import org.springframework.stereotype.Component;
 @Component
 public class LLMIntentClassifier implements IntentClassifier {
 
-    private final ChatClient chatClient;
-    private final BeanOutputConverter<IntentClassification> converter;
+    private static final String CLASSIFY_PROMPT_PATH = "prompts/intent-classify.st";
 
-    private static final String CLASSIFY_PROMPT = """
+    /** 文件缺失时的内联兜底提示词 */
+    private static final String FALLBACK_CLASSIFY_PROMPT = """
             判断用户意图、情绪、是否确认调用工具，以及目标MCP服务名，返回JSON格式：
             {"intent":"分类","reason":"理由简述","confidence":置信度,"emotion":"情绪","toolConfirm":是否确认,"targetMcpServer":"服务名"}
 
             意图分类选项：
             calculation - 计算类（工资、补偿、天数、费用等需要数值计算）
             reference  - 资料查阅类（定义、规定、流程、制度等知识查询）
-            operation  - 操作类（入职、离职、请假、查询信息、合同签署、路线规划等需要调用外部工具的业务办理）
-            escalation - 转人工（用户明确要求"转人工""找人工客服""叫人来"）
-            chitchat   - 闲聊（问候、感谢、无关话题）
+            operation  - 操作类（需要调用外部工具的业务办理，如路线规划、距离查询、考勤查询等）
+                        重要判断：当用户问题涉及"多远/多久/路线/距离/时间"等需要实时数据的，分类为 operation
+            escalation - 转人工
+            chitchat   - 闲聊
+            planning   - 规划类（旅游计划、方案设计、行程安排等需要基于素材推理整合的任务）
+                        特征词：计划/方案/安排/清单/给我几个/对比一下/帮我选/规划
+                        分类优先级：当planning特征词与operation隐式触发词（路程/时间/价格/距离）同时出现时，优先planning
 
-            情绪判断选项：
-            positive - 积极、满意
-            neutral  - 中性、正常
-            negative - 负面、不满、不耐烦、愤怒
+            情绪判断：positive/neutral/negative
+            toolConfirm：仅intent=operation时需要判断，其他固定false
+            targetMcpServer：仅intent=operation时填写，必须从下方可用服务列表中选取，列表中不存在则填空
 
-            是否确认调用工具（toolConfirm）：
-            仅当intent=operation时需要判断，其他情况固定false。
-            true  = 用户明确确认要执行操作
-                   特别注意：必须结合对话历史判断，例如：
-                   - 对话历史中助手推荐过调用工具，用户当前消息是"好的""嗯""可以""OK"等简短确认 → true
-                   - 用户说"帮我查""执行""确认""查一下""我要看"等明确执行意图 → true
-            false = 用户只是在询问或描述需求，尚未确认执行
+            {mcp_services_block}
 
-            目标MCP服务名（targetMcpServer）：
-            仅当intent=operation且能明确判断用户要调用哪个MCP服务时填写具体服务名，否则为空字符串""。
-
-            示例：用户说"帮我查一下去公司的路线" → targetMcpServer="amap-maps"
-                 用户说"查一下我的考勤" → targetMcpServer="ziniu-local-server"
-                 用户说"能做什么"或无法判断 → targetMcpServer=""
-                 以此类推
-
-            置信度: 0.0~1.0（对分类判断的确信程度）
+            置信度: 0.0~1.0
             """;
 
-    public LLMIntentClassifier(ChatModel chatModel) {
+    private final ChatClient chatClient;
+    private final BeanOutputConverter<IntentClassification> converter;
+    private final McpServerConfigMapper mcpServerConfigMapper;
+    private final String classifySystemPrompt;
+
+    public LLMIntentClassifier(ChatModel chatModel, McpServerConfigMapper mcpServerConfigMapper) {
+        this.mcpServerConfigMapper = mcpServerConfigMapper;
+        this.classifySystemPrompt = loadClassifyPrompt();
         this.chatClient = ChatClient.builder(chatModel)
-                .defaultSystem(CLASSIFY_PROMPT)
+                .defaultSystem(classifySystemPrompt)
                 .build();
         this.converter = new BeanOutputConverter<>(IntentClassification.class);
+    }
+
+    /**
+     * 从 classpath 加载分类提示词文件，缺失时降级到内联兜底
+     * <p>文件位置：resources/prompts/intent-classify.st</p>
+     */
+    private String loadClassifyPrompt() {
+        try {
+            ClassPathResource resource = new ClassPathResource(CLASSIFY_PROMPT_PATH);
+            String content = StreamUtils.copyToString(resource.getInputStream(), StandardCharsets.UTF_8);
+            log.info("[LLMIntentClassifier] 分类提示词加载成功, 路径={}, 长度={}字", CLASSIFY_PROMPT_PATH, content.length());
+            return content;
+        } catch (IOException e) {
+            log.warn("[LLMIntentClassifier] 分类提示词文件缺失，降级为内联兜底: {}", CLASSIFY_PROMPT_PATH);
+            return FALLBACK_CLASSIFY_PROMPT;
+        }
     }
 
     @Override
@@ -73,7 +94,9 @@ public class LLMIntentClassifier implements IntentClassifier {
     public ClassifyResult classify(String question, String history) {
         try {
             String format = converter.getFormat();
-            String userPrompt = buildUserPrompt(question, history, format);
+            // 动态注入可用MCP服务列表，让LLM知道真实服务名而非凭空编造
+            String mcpServicesBlock = buildMcpServicesBlock();
+            String userPrompt = buildUserPrompt(question, history, format, mcpServicesBlock);
 
             String result = chatClient.prompt()
                     .user(userPrompt)
@@ -113,14 +136,39 @@ public class LLMIntentClassifier implements IntentClassifier {
     }
 
     /**
-     * 构建 user prompt（包含历史对话）
+     * 动态构建可用MCP服务列表文本（注入到user prompt，让LLM知道真实服务名）
      */
-    private String buildUserPrompt(String question, String history, String format) {
+    private String buildMcpServicesBlock() {
+        try {
+            List<McpServerConfig> configs = mcpServerConfigMapper.selectAllEnabled();
+            if (configs == null || configs.isEmpty()) {
+                return "当前无可用MCP服务，targetMcpServer 一律填空字符串 \"\"。";
+            }
+            StringBuilder sb = new StringBuilder("【可用MCP服务列表（targetMcpServer 必须从以下服务名中选取，禁止编造）】\n");
+            for (McpServerConfig c : configs) {
+                String desc = c.getDescription() != null && !c.getDescription().isEmpty()
+                        ? " — " + c.getDescription() : "";
+                sb.append("- ").append(c.getServerName()).append(desc).append("\n");
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            log.warn("[LLMIntentClassifier] 查询MCP服务列表失败: {}", e.getMessage());
+            return "MCP服务列表暂不可用，targetMcpServer 一律填空字符串 \"\"。";
+        }
+    }
+
+    /**
+     * 构建 user prompt（包含历史对话 + 可用服务列表）
+     */
+    private String buildUserPrompt(String question, String history, String format, String mcpServicesBlock) {
         StringBuilder sb = new StringBuilder();
         if (history != null && !history.trim().isEmpty()) {
             sb.append("对话历史：\n").append(history).append("\n\n");
         }
-        sb.append("当前用户消息：").append(question).append("\n").append(format);
+        sb.append("当前用户消息：").append(question).append("\n");
+        // 注入可用服务列表（作为分类参考，不是主提示词），放在format之前以减小对JSON输出的干扰
+        sb.append(mcpServicesBlock).append("\n");
+        sb.append(format);
         return sb.toString();
     }
 }

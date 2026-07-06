@@ -66,10 +66,14 @@ public class ContextBuildNode {
                 context.append(" [").append(chunkType).append("]");
             }
 
-            // 图片类型：把描述文本和可展示URL一起交给LLM，并明确要求输出Markdown图片语法
+            // 图片类型：从 metadata 读取原始视觉描述，生成 Markdown 图片语法
             if ("IMAGE".equalsIgnoreCase(chunkType)) {
                 Object imgUrl = doc.getMetadata().get("image_url");
-                String imgText = doc.getText().replace("\\n", "\n").replace("\\t", "\t");
+                // 优先读取 image_description（纯视觉描述），fallback 到 doc.getText()（可能是搜索标签）
+                Object rawDesc = doc.getMetadata().get("image_description");
+                String imgText = (rawDesc != null && !rawDesc.toString().isEmpty())
+                        ? rawDesc.toString().replace("\\n", "\n").replace("\\t", "\t")
+                        : doc.getText().replace("\\n", "\n").replace("\\t", "\t");
                 if (imgUrl != null && !imgUrl.toString().isEmpty()) {
                     String safeUrl = imgUrl.toString().replace(" ", "%20");
                     String altText = imgText.length() > 30

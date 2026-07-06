@@ -7,15 +7,19 @@ import com.xushu.rag.service.IRerankStrategy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * 向量检索Node（完全对标旧版 AiRagController.processKbRagQuery 检索链路）
- * <p>Milvus检索(topK=10) → VersionFirst排序 → Small-to-Big回表 → 二次检索原始chunk</p>
- * <p>不做额外Rerank、不做特殊IMAGE/TABLE处理，与旧版保持完全一致的召回粒度</p>
+ * 向量检索Node（Modality-Aware Reranking 架构）
+ * <p>完整链路：Milvus混合检索 → VersionFirst排序 → Small-to-Big回表
+ * → 模态分离（TEXT/IMAGE/TABLE） → 文本Rerank(主Rerank) + 图片关联检索
+ * → 图片独立Rerank(top-{maxImages}) → 最终合并</p>
+ * <p>核心设计：不同模态在不同语义空间，混在一起Rerank会导致图片/表格被文本淹没。
+ * 参照业界Multi-modal RAG的Modality-Aware Reranking模式，各模态独立精排。</p>
  *
  * @author Joseph
  */
@@ -25,6 +29,13 @@ public class RetrievalNode {
 
     /** 一阶段粗召回 topK（有 Qwen3Rerank 精排兜底，可放宽门槛捕获更多候选） */
     private static final int TOP_K = 20;
+
+    /** Qwen3Rerank 文本精排后保留的最大文本/父页面文档数 */
+    private static final int MAX_TEXT_DOCS = 8;
+
+    /** 图片独立 Rerank 后保留的最大图片数（可配置） */
+    @Value("${retrieval.image.max-count:3}")
+    private int maxImages;
 
     private final HybridSearchService hybridSearchService;
     private final DocumentPageService documentPageService;
@@ -101,43 +112,114 @@ public class RetrievalNode {
         List<Document> parentDocs = mapToParentPages(rankedDocs);
         log.info("[Retrieval] ③Small-to-Big: {}chunk→{}父页面", rankedDocs.size(), parentDocs.size());
 
-        // ④ 合并：父页面 + 留存原始chunk去重（回补IMAGE/TABLE等Small-to-Big丢失的内容）
-        List<Document> merged = new ArrayList<>(parentDocs);
+        // ④ 合并父页面+原始chunk，同时按模态分离（TEXT/PARENT_PAGE vs IMAGE vs TABLE）
+        List<Document> textDocs = new ArrayList<>(parentDocs);  // PARENT_PAGE → 文本
+        List<Document> imageDocs = new ArrayList<>();
+        List<Document> tableDocs = new ArrayList<>();
         Set<String> seenTexts = parentDocs.stream()
                 .map(Document::getText)
                 .collect(Collectors.toSet());
         for (Document raw : rawChunks) {
-            if (seenTexts.add(raw.getText())) {
-                merged.add(raw);
+            if (!seenTexts.add(raw.getText())) continue;
+            String chunkType = Objects.toString(raw.getMetadata().get("chunk_type"), "").toUpperCase();
+            switch (chunkType) {
+                case "IMAGE" -> imageDocs.add(raw);
+                case "TABLE" -> tableDocs.add(raw);
+                default -> textDocs.add(raw);
             }
         }
-        log.info("[Retrieval] ④合并: 父页面{} + 原始chunk = 共{}个", parentDocs.size(), merged.size());
+        log.info("[Retrieval] ④模态分离: TEXT={}个, IMAGE={}个, TABLE={}个",
+                textDocs.size(), imageDocs.size(), tableDocs.size());
 
-        // ⑤ Qwen3Rerank 语义精排 — 全量文档参与打分（含IMAGE/TABLE）
-        if (merged.size() > 8) {
-            Map<String, Object> rerankCtx = new HashMap<>();
-            rerankCtx.put("query", question);
-            rerankCtx.put("kbIds", kbIds);
-            log.info("[Retrieval] ⑤Qwen3Rerank 触发, 候选{}个文档", merged.size());
-            merged = rerankWithFallback(merged, rerankCtx);
-            log.info("[Retrieval] ⑤Rerank完成 → {}个文档", merged.size());
+        // ⑤ 文本Rerank：仅对 TEXT/PARENT_PAGE 做主Rerank（图像/表格不参与，避免被文本淹没）
+        Map<String, Object> rerankCtx = new HashMap<>();
+        rerankCtx.put("query", question);
+        rerankCtx.put("kbIds", kbIds);
+        if (textDocs.size() > MAX_TEXT_DOCS) {
+            log.info("[Retrieval] ⑤文本Rerank 触发, 候选{}个文本文档", textDocs.size());
+            textDocs = rerankWithFallback(textDocs, rerankCtx);
+            log.info("[Retrieval] ⑤文本Rerank完成 → {}个文本文档", textDocs.size());
         }
 
-        long finalImgCount = merged.stream()
-                .filter(d -> "IMAGE".equalsIgnoreCase(
-                        Objects.toString(d.getMetadata().get("chunk_type"), "")))
-                .count();
-        long finalTblCount = merged.stream()
-                .filter(d -> "TABLE".equalsIgnoreCase(
-                        Objects.toString(d.getMetadata().get("chunk_type"), "")))
-                .count();
-        log.info("[Retrieval] 最终输出: {}个页面, IMAGE={}个, TABLE={}个",
-                merged.size(), finalImgCount, finalTblCount);
+        // ⑥ 图片关联检索：按已命中文本的 source+version 拉取同文档所有图片
+        Set<String> svPairs = new LinkedHashSet<>();
+        for (Document doc : textDocs) {
+            String source = Objects.toString(doc.getMetadata().get("source"), "");
+            String version = Objects.toString(doc.getMetadata().get("version"), "");
+            if (!source.isEmpty()) {
+                svPairs.add(source + "|" + version);
+            }
+        }
+        if (!svPairs.isEmpty()) {
+            List<Document> associatedImages = hybridSearchService.fetchImagesBySourceVersion(svPairs);
+            Set<String> existingIds = imageDocs.stream().map(Document::getId).collect(Collectors.toSet());
+            int added = 0;
+            for (Document img : associatedImages) {
+                if (existingIds.add(img.getId())) {
+                    imageDocs.add(img);
+                    added++;
+                }
+            }
+            if (added > 0) {
+                log.info("[Retrieval] ⑥图片关联: {}个(source,version) → 新增{}张图片",
+                        svPairs.size(), added);
+            }
+        }
+
+        // ⑦ 图片独立Rerank：与文本分离，图片描述 vs query 独立打分，超过阈值则取 top-N
+        if (imageDocs.size() > maxImages) {
+            log.info("[Retrieval] ⑦图片Rerank 触发, 候选{}张图片, 阈值maxImages={}",
+                    imageDocs.size(), maxImages);
+            Map<String, Object> imgRerankCtx = new HashMap<>(rerankCtx);
+            imgRerankCtx.put("maxResults", maxImages);
+            imageDocs = rerankImages(imageDocs, imgRerankCtx, maxImages);
+            log.info("[Retrieval] ⑦图片Rerank完成 → top{}张图片", imageDocs.size());
+        }
+
+        // ⑧ 最终合并：文本 + 精排图片 + 表格
+        List<Document> merged = new ArrayList<>(textDocs);
+        merged.addAll(imageDocs);
+        merged.addAll(tableDocs);
+
+        long finalImgCount = imageDocs.size();
+        long finalTblCount = tableDocs.size();
+        log.info("[Retrieval] 最终输出: {}个页面 (TEXT={}, IMAGE={}, TABLE={})",
+                merged.size(), textDocs.size(), finalImgCount, finalTblCount);
 
         return Map.of(
                 StateKeys.DOCUMENTS, merged,
                 StateKeys.STEPS, "检索完成: 命中" + merged.size() + "个相关页面"
         );
+    }
+
+    /**
+     * 图片独立 Rerank：与文本池分离，图片描述(embedding标签+视觉描述) vs query 独立打分
+     * <p>设计理念：图片的语义密度远低于文本（短标签 vs 长篇段落），
+     * 混在同一个 Rerank 池中会被文本一致性淹没。独立打分后取 top-N。</p>
+     *
+     * @param images   图片文档列表（desc 文本可用于语义打分）
+     * @param ctx      上下文（query 等）
+     * @param maxCount 保留的最大图片数
+     * @return top-N 图片文档
+     */
+    private List<Document> rerankImages(List<Document> images, Map<String, Object> ctx, int maxCount) {
+        if (images.size() <= maxCount) return images;
+
+        try {
+            List<Document> ranked = primaryRerank.rerank(images, ctx);
+            if (ranked != null && !ranked.isEmpty()) {
+                List<Document> result = ranked.subList(0, Math.min(maxCount, ranked.size()));
+                log.info("[Rerank-img] Qwen3Rerank返回{}张, 截取top{}张", ranked.size(), result.size());
+                return result;
+            }
+            // ranked 非 null 但为空 → 所有图片分数都低于阈值，不相关
+            log.info("[Rerank-img] Qwen3Rerank返回0张(全部低于分数阈值)，舍弃所有图片");
+            return Collections.emptyList();
+        } catch (Exception e) {
+            log.warn("[Rerank-img] Qwen3Rerank异常, 降级取首个: {}", e.getMessage());
+            // 只在 API 故障时降级，不因低相关度降级
+            return images.subList(0, Math.min(1, images.size()));
+        }
     }
 
     /**

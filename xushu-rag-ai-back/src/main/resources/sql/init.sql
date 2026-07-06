@@ -209,6 +209,10 @@ VALUES (1, NULL, '通用模板', '你是{kb_name}知识库的智能助手，请�
 INSERT INTO `prompt_template` (`kb_id`, `name`, `template_content`, `description`, `template_type`, `variables`, `status`, `is_default`, `create_time`, `update_time`)
 VALUES (NULL, '操作执行模板', '你是操作助手，请根据用户的要求判断需要执行什么操作。\n\n如果用户尚未明确确认执行，请描述操作详情和所需参数，在回答末尾征求用户确认。\n如果用户已确认（如回复\"是\"\"确定\"\"执行\"），请直接整理操作参数。\n\n用户请求：{question}', '用于执行操作类任务，如信息查询、合同签署、流程办理等', 'operation', '[\"question\"]', 'ACTIVE', 1, NOW(), NOW());
 
+-- 规划类模板（planning意图专用：基于知识库素材推理整合，支持多方案输出，主动推荐工具）
+INSERT INTO `prompt_template` (`kb_id`, `name`, `template_content`, `description`, `template_type`, `variables`, `status`, `is_default`, `create_time`, `update_time`)
+VALUES (NULL, '规划类模板', '你是"Joseph.zhou"知识库系统的规划助手。用户希望基于知识库内容进行规划、整合或方案设计。\n\n以下是知识库中检索到的素材：\n{context}\n\n【你的职责】\n基于上述素材进行规划、整合、推理，给出符合用户要求的方案。\n\n【工作规范】\n1. 素材使用：\n   - 优先使用知识库素材中的具体信息（景点介绍、政策规定、产品参数等）\n   - 引用素材时在末尾标注来源：`📚 参考来源：文件名 (版本xxx)`\n   - 素材中明确没有的信息，标注"[需调用工具确认]"，不要自行编造\n\n2. 工具推荐：\n   - 涉及路线/距离/时间/天气等实时数据时，主动推荐可用服务列表中的相应工具\n   - 推荐格式：「涉及具体路程，建议我调用路线规划服务查询，需要您提供：起点、终点」\n   - 不要在本次回复中直接执行工具，等用户确认后再调用\n\n3. 多方案输出：\n   - 如果用户要求多个方案，给出 2-3 个差异化方案\n   - 每个方案标注差异点（如"文化历史向"/"自然风光向"）\n   - 列出每个方案的理由和权衡点\n\n4. 图片输出：\n   - 按指令输出Markdown图片语法 ![描述](URL)\n\n5. 诚实原则：\n   - 素材完全无法支撑的规划，明确告知"知识库素材不足以支撑该规划"\n   - 不要用自身知识编造具体数据（距离、价格、时间）', '规划类意图专用模板：基于知识库素材推理整合，支持多方案输出，主动推荐工具', 'planning', '["context"]', 'ACTIVE', 0, NOW(), NOW());
+
 -- MCP Server 示例数据
 -- 高德地图（stdio模式，Windows需cmd /c 包裹）
 INSERT INTO `mcp_server_config` (`server_name`, `description`, `server_category`, `config_json`, `disabled`)

@@ -49,6 +49,7 @@ public class LLMGenerateNode {
         String context = (String) state.getOrDefault(StateKeys.CONTEXT, "");
         String question = (String) state.getOrDefault(StateKeys.QUESTION, "");
         String conversationId = (String) state.getOrDefault(StateKeys.CONVERSATION_ID, "default");
+        String category = (String) state.getOrDefault(StateKeys.CATEGORY, "");
 
         // 调用 LLM 前检查客户端是否已断开，避免最耗时的 LLM 调用继续执行
         AtomicBoolean cancelled = (AtomicBoolean) state.getOrDefault(StateKeys.CANCELLED, null);
@@ -76,6 +77,18 @@ public class LLMGenerateNode {
         String augmentedUser;
         if (context != null && !context.isEmpty()
                 && !"知识库中暂无相关内容".equals(context)) {
+            // planning 类别用不同的尾约束：鼓励推理整合，而非严格"答不上就拒绝"
+            String tail;
+            if ("planning".equalsIgnoreCase(category)) {
+                tail = "Based on the materials above, plan, integrate, and reason to provide solutions " +
+                        "that meet the user's requirements. If the materials are insufficient for a " +
+                        "complete plan, clearly state which parts need tool confirmation. " +
+                        "Do not fabricate specific data (distances, prices, times).";
+            } else {
+                tail = "Given the context and provided history information and not prior knowledge, " +
+                        "reply to the user comment. If the answer is not in the context, inform " +
+                        "the user that you can't answer the question.";
+            }
             augmentedUser = question + "\n\n" +
                     "Context information is below, surrounded by ---------------------\n" +
                     "\n" +
@@ -83,9 +96,7 @@ public class LLMGenerateNode {
                     context + "\n" +
                     "---------------------\n" +
                     "\n" +
-                    "Given the context and provided history information and not prior knowledge, " +
-                    "reply to the user comment. If the answer is not in the context, inform " +
-                    "the user that you can't answer the question.";
+                    tail;
         } else {
             augmentedUser = question;
         }

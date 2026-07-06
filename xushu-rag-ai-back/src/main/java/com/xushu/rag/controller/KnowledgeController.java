@@ -661,14 +661,37 @@ public class KnowledgeController {
                 }
 
                 try {
-                    // 3. 多模态描述
-                    String description = imageDescriber.describeImage(image.getPath());
-                    if (description == null || description.isEmpty()) {
+                    // 3. 多模态描述（带文档上下文，生成结构化标签+描述）
+                    String rawOutput = imageDescriber.describeImage(
+                            image.getPath(), originalFilename, kbName);
+                    if (rawOutput == null || rawOutput.isEmpty()) {
                         log.warn("图片描述为空，跳过: {}", image.getName());
                         continue;
                     }
 
+                    // 解析结构化输出：[主题标签] ... \n[图片描述] ...
+                    String searchTags;
+                    String description;
+                    String[] parts = rawOutput.split("\\[图片描述\\]");
+                    if (parts.length >= 2) {
+                        // 提取标签部分，去掉 [主题标签] 前缀
+                        String tagsPart = parts[0].replace("[主题标签]", "").trim();
+                        searchTags = tagsPart.isEmpty() ? rawOutput : tagsPart;
+                        description = parts[1].trim();
+                    } else {
+                        // fallback：旧格式或解析失败，整体作为描述
+                        searchTags = rawOutput;
+                        description = rawOutput;
+                        log.debug("图片描述未包含预期的结构化标签，使用原始输出: {}", image.getName());
+                    }
+
+                    // 构建可搜索的 embedding 文本（标签+文档上下文 → 高召回率）
+                    String embeddingText = buildImageEmbeddingText(searchTags, kbName, originalFilename);
+                    log.debug("图片嵌入文本: {} -> {}", image.getName(),
+                            embeddingText.length() > 80 ? embeddingText.substring(0, 80) + "..." : embeddingText);
+
                     // 4. 向量化存储（含OSS URL）
+                    // embedding用可搜索标签，LLM上下文用原始视觉描述
                     Map<String, Object> metadata = new HashMap<>();
                     metadata.put("source", originalFilename);
                     metadata.put("kb_id", kbId);
@@ -683,9 +706,13 @@ public class KnowledgeController {
                     metadata.put("image_width", image.getWidth());
                     metadata.put("image_height", image.getHeight());
                     metadata.put("parent_page_text", description);
+                    // 原始视觉描述存入 metadata，供 ContextBuildNode 展示给 LLM
+                    metadata.put("image_description", description);
+                    // 搜索标签也存一份，方便后续排查
+                    metadata.put("search_tags", searchTags);
 
                     org.springframework.ai.document.Document aiDoc =
-                            new org.springframework.ai.document.Document(description, metadata);
+                            new org.springframework.ai.document.Document(embeddingText, metadata);
                     milvusV2InsertService.insertDocuments(java.util.Collections.singletonList(aiDoc));
 
                     log.info("图片处理完成并向量化: {}, page={}", image.getName(), image.getPageNumber());
@@ -706,6 +733,36 @@ public class KnowledgeController {
         } catch (Exception e) {
             log.error("图片异步处理异常: {}", originalFilename, e);
         }
+    }
+
+    /**
+     * 构建图片的 embedding 文本 —— 可搜索标签 + 文档上下文
+     * <p>标签来自视觉模型输出的结构化 [主题标签]，用于语义检索高召回；
+     * 原始视觉描述存入 metadata.image_description，供 LLM 上下文展示。</p>
+     *
+     * @param searchTags      视觉模型输出的主题标签（逗号分隔的关键词）
+     * @param kbName          知识库名称
+     * @param originalFilename 原始文档名
+     * @return 用于 embedding 的文本
+     */
+    private String buildImageEmbeddingText(String searchTags, String kbName, String originalFilename) {
+        StringBuilder sb = new StringBuilder();
+        // 文档来源（确保文档名中的关键词能被检索到）
+        if (originalFilename != null && !originalFilename.isEmpty()) {
+            // 去掉文件扩展名和多余符号，提取关键词
+            String docKeywords = originalFilename
+                    .replaceAll("\\.[^.]+$", "")         // 去扩展名
+                    .replaceAll("[\\s_\\-（）()]", " ");  // 分隔符转空格
+            sb.append("【").append(docKeywords).append("】");
+        }
+        if (kbName != null && !kbName.isEmpty()) {
+            sb.append("【").append(kbName).append("】");
+        }
+        // 主题标签（视觉模型输出）
+        if (searchTags != null && !searchTags.isEmpty()) {
+            sb.append(searchTags);
+        }
+        return sb.toString().trim();
     }
 
     /**

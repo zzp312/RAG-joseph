@@ -1,8 +1,10 @@
 package com.xushu.rag.service;
 
 import io.milvus.v2.client.MilvusClientV2;
+import io.milvus.v2.service.vector.request.QueryReq;
 import io.milvus.v2.service.vector.request.SearchReq;
 import io.milvus.v2.service.vector.request.data.EmbeddedText;
+import io.milvus.v2.service.vector.response.QueryResp;
 import io.milvus.v2.service.vector.response.SearchResp;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
@@ -161,6 +163,83 @@ public class HybridSearchService {
             }
         }
         return null;
+    }
+
+    // ==================== 图片关联查询 ====================
+
+    /**
+     * 按 source+version 组合拉取同文档的所有 IMAGE 文档
+     * <p>用于 Rerank 后补全图片：文本 chunk 已精排命中，但其关联的图片可能因 embedding 语义距离远而被过滤。
+     * 此方法用纯 filter 查询（不依赖向量相似度），确保同文档的图片一定被带回。</p>
+     *
+     * @param sourceVersionPairs source+version 组合集合，格式 "source|version"
+     * @return 对应文档的所有 IMAGE 类型 Document
+     */
+    public List<Document> fetchImagesBySourceVersion(Set<String> sourceVersionPairs) {
+        if (sourceVersionPairs == null || sourceVersionPairs.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // 构建 OR 过滤条件：(source==X && version==Y) || (source==Z && version==W) || ...
+        StringBuilder filter = new StringBuilder();
+        boolean first = true;
+        for (String sv : sourceVersionPairs) {
+            String[] parts = sv.split("\\|", 2);
+            String source = parts[0];
+            String version = parts.length > 1 ? parts[1] : "";
+            if (!first) filter.append(" || ");
+            filter.append("(")
+                    .append("metadata[\"source\"] == \"").append(escapeFilterString(source)).append("\"")
+                    .append(" && metadata[\"version\"] == \"").append(escapeFilterString(version)).append("\"")
+                    .append(" && metadata[\"chunk_type\"] == \"IMAGE\"")
+                    .append(")");
+            first = false;
+        }
+
+        try {
+            QueryReq queryReq = QueryReq.builder()
+                    .collectionName(collectionName)
+                    .filter(filter.toString())
+                    .outputFields(Arrays.asList("doc_id", "content", "metadata"))
+                    .limit(200)
+                    .build();
+            QueryResp resp = v2Client.query(queryReq);
+
+            List<Document> images = new ArrayList<>();
+            if (resp.getQueryResults() != null) {
+                for (QueryResp.QueryResult result : resp.getQueryResults()) {
+                    Map<String, Object> entity = result.getEntity();
+                    if (entity == null) continue;
+
+                    String docId = Objects.toString(entity.get("doc_id"), "");
+                    String content = Objects.toString(entity.get("content"), "");
+
+                    Map<String, Object> docMeta = new HashMap<>();
+                    Object metaObj = entity.get("metadata");
+                    if (metaObj instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> metaMap = (Map<String, Object>) metaObj;
+                        docMeta.putAll(metaMap);
+                    }
+
+                    images.add(new Document(docId, content, docMeta));
+                }
+            }
+            log.info("[HybridSearch] 图片关联查询: {}个(source,version) → {}张图片",
+                    sourceVersionPairs.size(), images.size());
+            return images;
+        } catch (Exception e) {
+            log.warn("[HybridSearch] 图片关联查询失败: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    /**
+     * 转义过滤表达式中的特殊字符（引号等）
+     */
+    private String escapeFilterString(String s) {
+        if (s == null) return "";
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     // ==================== Filter 转换 ====================

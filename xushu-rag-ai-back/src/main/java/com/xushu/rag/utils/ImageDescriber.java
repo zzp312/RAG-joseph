@@ -7,7 +7,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -35,16 +34,28 @@ public class ImageDescriber {
     @Value("${dashscope.multimodal.model:qwen-vl-plus}")
     private String model;
 
-    @Value("${dashscope.multimodal.max-tokens:400}")
+    @Value("${dashscope.multimodal.max-tokens:500}")
     private int maxTokens;
 
     /**
      * 对图片生成中文语义描述
      *
      * @param imagePath 图片文件路径
-     * @return 中文描述文本，失败时返回null
+     * @return 格式为 "[主题标签]\n标签内容\n[图片描述]\n描述内容" 的结构化文本，失败时返回null
      */
     public String describeImage(String imagePath) {
+        return describeImage(imagePath, null, null);
+    }
+
+    /**
+     * 对图片生成中文语义描述（带文档上下文，提升检索召回率）
+     *
+     * @param imagePath       图片文件路径
+     * @param documentName    所属文档名称（如"洛阳旅游景点全解析.docx"），可为null
+     * @param kbName          所属知识库名称，可为null
+     * @return 结构化文本，失败时返回null
+     */
+    public String describeImage(String imagePath, String documentName, String kbName) {
         if (dashscopeApiKey == null || dashscopeApiKey.isEmpty()) {
             log.warn("DashScope API Key未配置，跳过图片描述");
             return null;
@@ -69,17 +80,29 @@ public class ImageDescriber {
             JSONObject input = new JSONObject();
             JSONArray messages = new JSONArray();
 
-            // system message
+            // system message（优化：要求输出结构化标签+描述，标签用于检索召回）
             JSONObject sysMsg = new JSONObject();
             sysMsg.put("role", "system");
             JSONArray sysContent = new JSONArray();
             JSONObject sysText = new JSONObject();
-            sysText.put("text", "你是一个专业的文档图片分析助手，请用中文简洁准确地描述图片中的内容，包括图表类型、关键数据、主要趋势和文字信息。");
+            sysText.put("text",
+                    "你是一个专业的图片内容分析助手。请按以下严格格式描述图片内容：\n\n"
+                    + "[主题标签]\n"
+                    + "用3-8个逗号分隔的关键词标签概括图片主题，包括：地点、类别、主要对象、适用场景等。"
+                    + "例如：洛阳,美食,锅贴,西工饭庄,小吃,特色餐饮\n\n"
+                    + "[图片描述]\n"
+                    + "用中文详细描述图片中的具体内容，包括场景、主体对象、文字信息、氛围等。"
+                    + "描述应保持客观准确，便于后续检索和理解。\n\n"
+                    + "输出示例：\n"
+                    + "[主题标签]\n"
+                    + "洛阳,美食,锅贴,西工饭庄,小吃,传统餐饮\n"
+                    + "[图片描述]\n"
+                    + "西工饭庄小街锅贴的店铺外观，红色招牌上写着...");
             sysContent.add(sysText);
             sysMsg.put("content", sysContent);
             messages.add(sysMsg);
 
-            // user message with image
+            // user message with image + 文档上下文
             JSONObject userMsg = new JSONObject();
             userMsg.put("role", "user");
             JSONArray userContent = new JSONArray();
@@ -87,7 +110,13 @@ public class ImageDescriber {
             imgItem.put("image", imageUrl);
             userContent.add(imgItem);
             JSONObject textItem = new JSONObject();
-            textItem.put("text", "请描述这张图片的内容");
+            StringBuilder userText = new StringBuilder("请按格式描述这张图片。");
+            if (documentName != null || kbName != null) {
+                userText.append("该图片来自文档《").append(documentName != null ? documentName : "未知")
+                        .append("》（知识库：").append(kbName != null ? kbName : "默认").append("），");
+                userText.append("请在主题标签中体现文档的领域信息。");
+            }
+            textItem.put("text", userText.toString());
             userContent.add(textItem);
             userMsg.put("content", userContent);
             messages.add(userMsg);

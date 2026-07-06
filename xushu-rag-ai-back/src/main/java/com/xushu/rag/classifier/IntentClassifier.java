@@ -22,6 +22,8 @@ public interface IntentClassifier {
         ESCALATION("escalation"),
         /** 闲聊 */
         CHITCHAT("chitchat"),
+        /** 规划类（旅游计划、方案设计、行程安排等需要基于素材推理整合的任务） */
+        PLANNING("planning"),
         /** 未知 */
         UNKNOWN("unknown");
 
