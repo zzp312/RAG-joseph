@@ -7,6 +7,7 @@ import com.xushu.rag.common.ApplicationConstant;
 import com.xushu.rag.context.BaseContext;
 import com.xushu.rag.entity.SensitiveWord;
 import com.xushu.rag.service.DocumentPageService;
+import com.xushu.rag.service.HybridSearchService;
 import com.xushu.rag.service.IRerankStrategy;
 import com.xushu.rag.service.PromptTemplateService;
 import com.xushu.rag.service.SensitiveWordService;
@@ -65,6 +66,9 @@ public class AiRagController {
      */
     @Autowired
     private DocumentPageService documentPageService;
+
+    @Autowired
+    private HybridSearchService hybridSearchService;
 
     private ChatModel chatModel;
     private final ChatMemory chatMemory;
@@ -204,12 +208,6 @@ public class AiRagController {
                 .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, conversationId)
                         .param("chat_memory_response_size", 16));
 
-        SearchRequest.Builder searchRequestBuilder = SearchRequest.builder()
-                .query(message)
-                .similarityThreshold(0.1d)
-                .topK(10);
-
-        StringBuilder filterExpr = new StringBuilder();
         List<String> filterParts = new ArrayList<>();
 
         // 选了文件：只用文件过滤（文件自带KB归属，避免KB条件误杀空库）
@@ -223,19 +221,20 @@ public class AiRagController {
         log.info("[检索过滤] kbIds={}, sources={}, filterExpr={}",
                 kbIds, sources, filterParts.isEmpty() ? "无过滤(全文件)" : String.join(" && ", filterParts));
 
-        if (!filterParts.isEmpty()) {
-            filterExpr.append(String.join(" && ", filterParts));
-            searchRequestBuilder.filterExpression(filterExpr.toString());
-        }
+        String filterExprStr = filterParts.isEmpty() ? null : String.join(" && ", filterParts);
 
-        List<Document> retrievedDocs;
-        try {
-            retrievedDocs = vectorStore.similaritySearch(searchRequestBuilder.build());
-        } catch (Exception e) {
-            log.error("向量检索失败，Milvus可能未加载collection或连接异常: {}", e.getMessage());
-            retrievedDocs = Collections.emptyList();
+        // ① 混合检索（BM25 不可用时自动降级为纯向量检索）
+        List<Document> retrievedDocs = hybridSearchService.search(message, 10, filterExprStr);
+        log.info("[AiRag] ①混合检索 → {}个chunk", retrievedDocs.size());
+
+        // 为 QuestionAnswerAdvisor 构建检索请求（二次检索原始chunk）
+        SearchRequest.Builder searchRequestBuilder = SearchRequest.builder()
+                .query(message)
+                .topK(10)
+                .similarityThreshold(0.1);
+        if (filterExprStr != null) {
+            searchRequestBuilder.filterExpression(filterExprStr);
         }
-        log.info("[Old] ①Milvus检索 → {}个chunk", retrievedDocs.size());
 
         Map<String, Object> rerankContext = new HashMap<>();
         rerankContext.put("query", message);

@@ -2,11 +2,10 @@ package com.xushu.rag.graph.nodes;
 
 import com.xushu.rag.graph.StateKeys;
 import com.xushu.rag.service.DocumentPageService;
+import com.xushu.rag.service.HybridSearchService;
 import com.xushu.rag.service.IRerankStrategy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
-import org.springframework.ai.vectorstore.SearchRequest;
-import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
@@ -27,19 +26,19 @@ public class RetrievalNode {
     /** 一阶段粗召回 topK（有 Qwen3Rerank 精排兜底，可放宽门槛捕获更多候选） */
     private static final int TOP_K = 20;
 
-    private final VectorStore vectorStore;
+    private final HybridSearchService hybridSearchService;
     private final DocumentPageService documentPageService;
     private final IRerankStrategy versionFirstRerank;
     /** 保留注入（暂不使用，待P1/P2恢复语义Rerank） */
     private final IRerankStrategy primaryRerank;
     private final IRerankStrategy fallbackRerank;
 
-    public RetrievalNode(VectorStore vectorStore,
+    public RetrievalNode(HybridSearchService hybridSearchService,
                          DocumentPageService documentPageService,
                          @Qualifier("versionFirstRerankStrategy") IRerankStrategy versionFirstRerank,
                          @Qualifier("qwen3RerankStrategy") IRerankStrategy primaryRerank,
                          @Qualifier("llmRerankStrategy") IRerankStrategy fallbackRerank) {
-        this.vectorStore = vectorStore;
+        this.hybridSearchService = hybridSearchService;
         this.documentPageService = documentPageService;
         this.versionFirstRerank = versionFirstRerank;
         this.primaryRerank = primaryRerank;
@@ -66,26 +65,18 @@ public class RetrievalNode {
             filterParts.add("kb_id in " + com.alibaba.fastjson.JSON.toJSONString(kbIds));
         }
 
-        String filterExpr = filterParts.isEmpty() ? "无过滤(全文件)" : String.join(" && ", filterParts);
-        log.info("[Retrieval] kbIds={}, sources={}, filter={}", kbIds, sources, filterExpr);
+        String filterLog = filterParts.isEmpty() ? "无过滤(全文件)" : String.join(" && ", filterParts);
+        log.info("[Retrieval] kbIds={}, sources={}, filter={}", kbIds, sources, filterLog);
 
         String question = (String) state.getOrDefault(StateKeys.QUESTION, "");
 
-        // ① Milvus检索：topK=10, threshold=0.1, query=question（完全对标旧版）
-        SearchRequest.Builder builder = SearchRequest.builder()
-                .query(question)
-                .topK(TOP_K)
-                .similarityThreshold(0.1);
-
-        if (!filterParts.isEmpty()) {
-            builder.filterExpression(String.join(" && ", filterParts));
-        }
-
+        // ① 混合检索：Dense + BM25（BM25不可用时自动降级为纯向量检索）
+        String filterExpr = filterParts.isEmpty() ? null : String.join(" && ", filterParts);
         List<Document> retrievedDocs = Collections.emptyList();
         try {
-            retrievedDocs = vectorStore.similaritySearch(builder.build());
+            retrievedDocs = hybridSearchService.search(question, TOP_K, filterExpr);
         } catch (Exception e) {
-            log.error("[Retrieval] ①Milvus检索失败: {}", e.getMessage());
+            log.error("[Retrieval] ①混合检索失败: {}", e.getMessage());
         }
         log.info("[Retrieval] ①Milvus检索 → {}个chunk", retrievedDocs.size());
 

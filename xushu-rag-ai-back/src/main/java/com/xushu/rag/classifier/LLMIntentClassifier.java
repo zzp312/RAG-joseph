@@ -48,12 +48,11 @@ public class LLMIntentClassifier implements IntentClassifier {
 
             目标MCP服务名（targetMcpServer）：
             仅当intent=operation且能明确判断用户要调用哪个MCP服务时填写具体服务名，否则为空字符串""。
-            已知MCP服务列表：
-            - amap-maps：高德地图服务（路线规划、地址查询、POI搜索、天气查询等）
-            - ziniu-local-server：紫牛本地服务（本地业务功能）
+
             示例：用户说"帮我查一下去公司的路线" → targetMcpServer="amap-maps"
                  用户说"查一下我的考勤" → targetMcpServer="ziniu-local-server"
                  用户说"能做什么"或无法判断 → targetMcpServer=""
+                 以此类推
 
             置信度: 0.0~1.0（对分类判断的确信程度）
             """;

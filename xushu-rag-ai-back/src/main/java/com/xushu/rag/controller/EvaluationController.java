@@ -3,14 +3,13 @@ package com.xushu.rag.controller;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
+import com.xushu.rag.service.HybridSearchService;
 import com.xushu.rag.structured.EvalScore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.ai.document.Document;
-import org.springframework.ai.vectorstore.SearchRequest;
-import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 
@@ -31,12 +30,13 @@ import java.util.stream.Collectors;
 public class EvaluationController {
 
     private final ChatClient chatClient;
-    private final VectorStore vectorStore;
+    private final HybridSearchService hybridSearchService;
     private final BeanOutputConverter<EvalScore> converter;
 
-    public EvaluationController(ChatModel chatModel, VectorStore vectorStore) {
+    public EvaluationController(ChatModel chatModel,
+                             HybridSearchService hybridSearchService) {
         this.chatClient = ChatClient.builder(chatModel).build();
-        this.vectorStore = vectorStore;
+        this.hybridSearchService = hybridSearchService;
         this.converter = new BeanOutputConverter<>(EvalScore.class);
     }
 
@@ -52,14 +52,8 @@ public class EvaluationController {
     public String collect(@RequestBody JSONObject body) {
         String question = body.getString("question");
 
-        // ① 真实检索（对标工作流 topK=10）
-        List<Document> docs;
-        try {
-            docs = vectorStore.similaritySearch(SearchRequest.builder()
-                    .query(question).topK(10).similarityThreshold(0.1).build());
-        } catch (Exception e) {
-            docs = Collections.emptyList();
-        }
+        // ① 混合检索（BM25 不可用时自动降级为纯向量检索）
+        List<Document> docs = hybridSearchService.search(question, 10, null);
         List<String> contexts = docs.stream().map(Document::getText).collect(Collectors.toList());
         log.info("[Eval-Collect] question={}, 检索到{}个chunk", question, docs.size());
 
@@ -98,14 +92,8 @@ public class EvaluationController {
     public String runEval(@RequestBody JSONObject body) {
         String question = body.getString("question");
 
-        // ① 检索
-        List<Document> docs;
-        try {
-            docs = vectorStore.similaritySearch(SearchRequest.builder()
-                    .query(question).topK(10).similarityThreshold(0.1).build());
-        } catch (Exception e) {
-            return "{\"error\":\"检索失败: " + e.getMessage() + "\"}";
-        }
+        // ① 混合检索（BM25 不可用时自动降级为纯向量检索）
+        List<Document> docs = hybridSearchService.search(question, 10, null);
         List<String> contexts = docs.stream().map(Document::getText).collect(Collectors.toList());
 
         // ② 生成

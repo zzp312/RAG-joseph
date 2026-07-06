@@ -130,7 +130,7 @@ public class McpClientManager {
             McpClientTransport transport = buildTransport(config.getServerName(), cfg);
 
             McpSyncClient client = McpClient.sync(transport)
-                    .requestTimeout(Duration.ofSeconds(30))
+                    .requestTimeout(Duration.ofSeconds(20))
                     .build();
             client.initialize();
 

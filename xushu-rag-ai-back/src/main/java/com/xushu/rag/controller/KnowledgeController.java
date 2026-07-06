@@ -16,6 +16,7 @@ import com.xushu.rag.service.DocumentPageService;
 import com.xushu.rag.service.DocumentService;
 import com.xushu.rag.service.KnowledgeBaseService;
 import com.xushu.rag.service.impl.DocumentPageServiceImpl;
+import com.xushu.rag.service.MilvusV2InsertService;
 import com.xushu.rag.utils.AliOssUtil;
 import com.xushu.rag.utils.ImageDescriber;
 import com.xushu.rag.utils.ImageExtractor;
@@ -47,6 +48,9 @@ public class KnowledgeController {
 
     @Autowired
     private VectorStore vectorStore;
+
+    @Autowired
+    private MilvusV2InsertService milvusV2InsertService;
 
     @Autowired
     private AliOssUtil aliOssUtil;
@@ -171,11 +175,11 @@ public class KnowledgeController {
 
                 List<org.springframework.ai.document.Document> splitDocuments = tokenTextSplitter.apply(documents);
                 log.info("开始向量化，共{}个分块", splitDocuments.size());
-                // DashScope embedding 单次最多25条，分批写入
+                // DashScope embedding 单次最多25条，分批写入（V2 SDK，绕过 sparse_vector 校验）
                 final int EMBED_BATCH = 20;
                 for (int batch = 0; batch < splitDocuments.size(); batch += EMBED_BATCH) {
                     int toIdx = Math.min(batch + EMBED_BATCH, splitDocuments.size());
-                    vectorStore.add(splitDocuments.subList(batch, toIdx));
+                    milvusV2InsertService.insertDocuments(splitDocuments.subList(batch, toIdx));
                 }
                 log.info("向量化完成");
 
@@ -237,7 +241,8 @@ public class KnowledgeController {
 
                 if (autoClassify && targetKbId == null) {
                     BaseResponse suggestResponse = knowledgeBaseService.suggestKnowledgeBase(contentText);
-                    if (suggestResponse.getCode() == 0) {
+                    if (suggestResponse.getCode() == 0 && suggestResponse.getData() instanceof Map) {
+                        @SuppressWarnings("unchecked")
                         Map<String, Object> suggestData = (Map<String, Object>) suggestResponse.getData();
                         targetKbName = (String) suggestData.get("suggested_kb_name");
                         Boolean isNew = (Boolean) suggestData.get("is_new");
@@ -398,11 +403,11 @@ public class KnowledgeController {
                     aiDocuments = tokenTextSplitter.apply(aiDocuments);
                 }
 
-                // DashScope embedding 单次最多25条，分批写入
+                // DashScope embedding 单次最多25条，分批写入（V2 SDK，绕过 sparse_vector 校验）
                 final int EMBED_BATCH_SIZE = 20;
                 for (int batch = 0; batch < aiDocuments.size(); batch += EMBED_BATCH_SIZE) {
                     int toIdx = Math.min(batch + EMBED_BATCH_SIZE, aiDocuments.size());
-                    vectorStore.add(aiDocuments.subList(batch, toIdx));
+                    milvusV2InsertService.insertDocuments(aiDocuments.subList(batch, toIdx));
                 }
                 log.info("向量化完成，文件: {}，共{}个分块", originalFilename, aiDocuments.size());
 
@@ -681,7 +686,7 @@ public class KnowledgeController {
 
                     org.springframework.ai.document.Document aiDoc =
                             new org.springframework.ai.document.Document(description, metadata);
-                    vectorStore.add(java.util.Collections.singletonList(aiDoc));
+                    milvusV2InsertService.insertDocuments(java.util.Collections.singletonList(aiDoc));
 
                     log.info("图片处理完成并向量化: {}, page={}", image.getName(), image.getPageNumber());
 

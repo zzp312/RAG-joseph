@@ -26,7 +26,7 @@ public class PromptRouteNode {
     private final PromptTemplateService promptTemplateService;
     private final McpServerConfigMapper mcpServerConfigMapper;
 
-    @Value("${mcp.tools.suggest.enabled:false}")
+    @Value("${mcp.tools.suggest.enabled:true}")
     private boolean mcpSuggestEnabled;
 
     /**

@@ -123,7 +123,11 @@ public class KnowledgeBaseServiceImpl extends ServiceImpl<KnowledgeBaseMapper, K
     public BaseResponse suggestKnowledgeBase(String content) {
         List<KnowledgeBase> existingBases = knowledgeBaseMapper.selectActiveKnowledgeBases();
         if (existingBases.isEmpty()) {
-            return ResultUtils.success("通用知识库");
+            Map<String, Object> fallback = new HashMap<>();
+            fallback.put("suggested_kb_name", "通用知识库");
+            fallback.put("confidence", 1.0);
+            fallback.put("is_new", true);
+            return ResultUtils.success(fallback);
         }
 
         StringBuilder existingNames = new StringBuilder();
@@ -136,7 +140,7 @@ public class KnowledgeBaseServiceImpl extends ServiceImpl<KnowledgeBaseMapper, K
                 现有知识库列表：%s
                 文档内容摘要：%s
                 如果现有知识库都不合适，请给出一个广义的新知识库名称（2-4个字），便于后续类似文件自动路由。
-                请严格按照JSON格式返回：{"suggested_kb_name": "知识库名称", "confidence": 0-1, "is_new": true/false}
+                请严格按照JSON格式返回，不要输出任何其他文字：{"suggested_kb_name": "知识库名称", "confidence": 0-1, "is_new": true/false}
                 """;
 
         String formattedPrompt = String.format(prompt, existingNames.toString(), content.length() > 2000 ? content.substring(0, 2000) : content);
@@ -148,7 +152,14 @@ public class KnowledgeBaseServiceImpl extends ServiceImpl<KnowledgeBaseMapper, K
                     .call()
                     .content();
 
-            JSONObject jsonResponse = JSON.parseObject(response);
+            // 从LLM响应中提取JSON（兼容markdown代码块和文本+JSON混合输出）
+            String jsonStr = extractJsonFromLLMResponse(response);
+            if (jsonStr == null) {
+                log.warn("无法从LLM响应中提取JSON，响应内容: " + (response != null ? response.substring(0, Math.min(response.length(), 200)) : "null"));
+                throw new RuntimeException("LLM返回格式异常，无法解析JSON");
+            }
+
+            JSONObject jsonResponse = JSON.parseObject(jsonStr);
             String suggestedName = jsonResponse.getString("suggested_kb_name");
             double confidence = jsonResponse.getDoubleValue("confidence");
             boolean isNew = jsonResponse.getBooleanValue("is_new");
@@ -168,7 +179,61 @@ public class KnowledgeBaseServiceImpl extends ServiceImpl<KnowledgeBaseMapper, K
             return ResultUtils.success(result);
         } catch (Exception e) {
             log.error("LLM分类失败", e);
-            return ResultUtils.success("通用知识库");
+            Map<String, Object> fallback = new HashMap<>();
+            fallback.put("suggested_kb_name", "通用知识库");
+            fallback.put("confidence", 1.0);
+            fallback.put("is_new", true);
+            return ResultUtils.success(fallback);
         }
+    }
+
+    /**
+     * 从LLM响应中提取JSON字符串
+     * <p>兼容以下格式：
+     * <ul>
+     *   <li>纯JSON: {"key": "value"}</li>
+     *   <li>Markdown代码块: ```json\n{...}\n```</li>
+     *   <li>文本+JSON混合: 一些解释文字... {"key": "value"}</li>
+     * </ul>
+     * </p>
+     *
+     * @param response LLM原始响应
+     * @return 提取出的JSON字符串，如果无法提取则返回null
+     */
+    private String extractJsonFromLLMResponse(String response) {
+        if (response == null || response.trim().isEmpty()) {
+            return null;
+        }
+
+        // 1. 优先提取markdown代码块中的JSON
+        int codeBlockStart = response.indexOf("```json");
+        if (codeBlockStart >= 0) {
+            int jsonStart = response.indexOf('\n', codeBlockStart) + 1;
+            int jsonEnd = response.indexOf("```", jsonStart);
+            if (jsonEnd > jsonStart) {
+                return response.substring(jsonStart, jsonEnd).trim();
+            }
+        }
+        // 无lang标注的代码块
+        codeBlockStart = response.indexOf("```");
+        if (codeBlockStart >= 0) {
+            int jsonStart = response.indexOf('\n', codeBlockStart);
+            int jsonEnd = response.indexOf("```", jsonStart + 1);
+            if (jsonStart > 0 && jsonEnd > jsonStart) {
+                String candidate = response.substring(jsonStart, jsonEnd).trim();
+                if (candidate.startsWith("{")) {
+                    return candidate;
+                }
+            }
+        }
+
+        // 2. 从文本中提取JSON对象（找第一个{和最后一个}配对）
+        int firstBrace = response.indexOf('{');
+        int lastBrace = response.lastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+            return response.substring(firstBrace, lastBrace + 1).trim();
+        }
+
+        return null;
     }
 }
