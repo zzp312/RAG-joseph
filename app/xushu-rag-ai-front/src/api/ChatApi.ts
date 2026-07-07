@@ -32,6 +32,10 @@ export interface ChatMessage {
   fallbackVisible?: boolean;
   /** fallback 占位展示文本,如 "正在执行 检索..." */
   fallbackText?: string | null;
+  /** CoT 深度思考过程文本（后端 SSE thinking 事件推送） */
+  cotContent?: string;
+  /** CoT 深度思考块是否折叠 */
+  cotCollapsed?: boolean;
 }
 
 // 发送消息接口 (传统fetch方式)

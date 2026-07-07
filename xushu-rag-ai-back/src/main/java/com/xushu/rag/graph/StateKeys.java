@@ -83,6 +83,12 @@ public final class StateKeys {
      */
     public static final String CANCELLED = "__cancelled__";
 
+    /** CoT 推理过程文本（RetrievalAnswerStrategy/PlanningAnswerStrategy 产出，供 SSE 推送"深度思考"） */
+    public static final String COT_ANALYSIS = "cotAnalysis";
+
+    /** 答案形态：single_value | list | boolean | description | comparison（IntentClassifyNode写入，LLMGenerateNode读取） */
+    public static final String ANSWER_TYPE = "answerType";
+
     /** SSE步骤类型常量 */
     public static final class StepType {
         /** 思考中（意图分类、生成中） */

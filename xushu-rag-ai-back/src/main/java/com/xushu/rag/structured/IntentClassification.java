@@ -26,5 +26,11 @@ public record IntentClassification(
          * 例如："amap-maps"（高德地图服务）、"ziniu-local-server"（紫牛本地服务）
          * 无法判断或不需要调用MCP时为空字符串或null
          */
-        String targetMcpServer
+        String targetMcpServer,
+        /**
+         * 答案形态：single_value / list / boolean / description / comparison
+         * 用于 LLMGenerateNode 追加形态专属的输出结构约束。
+         * 旧版LLM可能不返回，调用方兜底"description"
+         */
+        String answerType
 ) {}

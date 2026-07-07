@@ -117,9 +117,10 @@ public class LLMIntentClassifier implements IntentClassifier {
                 String emotion = intentResult.emotion() != null ? intentResult.emotion() : "neutral";
                 boolean toolConfirm = Boolean.TRUE.equals(intentResult.toolConfirm());
                 String targetMcpServer = intentResult.targetMcpServer() != null ? intentResult.targetMcpServer() : "";
-                log.info("[L2 LLM] 结构化分类完成 category={}, confidence={}, reason={}, emotion={}, toolConfirm={}, targetMcpServer={}",
-                        category, intentResult.confidence(), intentResult.reason(), emotion, toolConfirm, targetMcpServer);
-                return new ClassifyResult(category, "L2", (int) (intentResult.confidence() * 100), emotion, toolConfirm, targetMcpServer);
+                String answerType = intentResult.answerType() != null ? intentResult.answerType() : "description";
+                log.info("[L2 LLM] 结构化分类完成 category={}, confidence={}, reason={}, emotion={}, toolConfirm={}, targetMcpServer={}, answerType={}",
+                        category, intentResult.confidence(), intentResult.reason(), emotion, toolConfirm, targetMcpServer, answerType);
+                return new ClassifyResult(category, "L2", (int) (intentResult.confidence() * 100), emotion, toolConfirm, targetMcpServer, answerType);
             } catch (Exception parseEx) {
                 // 【fallback】结构化解析失败，回退原有逻辑
                 log.warn("[L2 LLM] BeanOutputConverter解析失败，回退字符串匹配: {}", parseEx.getMessage());

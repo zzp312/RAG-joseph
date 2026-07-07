@@ -203,8 +203,12 @@ public class GraphChatController {
                             return;
                         }
 
-                        // 最终节点 → 发送答案
+                        // 最终节点 → 先推送CoT思考过程，再推送答案
                         if ("llm_generate".equals(nodeName)) {
+                            String cotAnalysis = (String) callbackData.getOrDefault(StateKeys.COT_ANALYSIS, "");
+                            if (cotAnalysis != null && !cotAnalysis.isEmpty()) {
+                                tryEmitOrLog(sink, SseFormatter.thinking(cotAnalysis));
+                            }
                             String answer = (String) callbackData.getOrDefault(StateKeys.ANSWER, "");
                             if (!answer.isEmpty()) {
                                 tryEmitOrLog(sink, SseFormatter.message(answer));

@@ -57,6 +57,20 @@
               </div>
             </div>
 
+            <!-- CoT 深度思考折叠块（在步骤和答案之间） -->
+            <div v-if="message.role === 'assistant' && message.cotContent"
+                 class="cot-block">
+              <div class="cot-header" @click="toggleCot(message)">
+                <span class="toggle-icon">{{ message.cotCollapsed ? '▸' : '▾' }}</span>
+                <span class="toggle-text">
+                  💭 {{ message.cotCollapsed ? '查看深度思考' : '隐藏深度思考' }}
+                </span>
+              </div>
+              <div v-show="!message.cotCollapsed" class="cot-body">
+                <pre class="cot-text">{{ message.cotContent }}</pre>
+              </div>
+            </div>
+
             <!-- 答案内容：直接展示，无打字机效果 -->
             <div class="message-content"
                  v-show="message.content || !message.isTyping"
@@ -333,6 +347,14 @@ const sendMessage = (ragUrl: string) => {
           scrollToBottom()
         } catch (e) { }
       }
+      if (eventName === 'thinking') {
+        try {
+          const thinkingData = JSON.parse(rawData)
+          returnReactiveMessage.cotContent = thinkingData.content || ''
+          returnReactiveMessage.cotCollapsed = false
+          scrollToBottom()
+        } catch (e) { }
+      }
       if (eventName === 'message') {
         const text = rawData.replace(/\\n/g, '\n')
         if (returnReactiveMessage.isTyping && returnReactiveMessage.content === '') returnReactiveMessage.stepsCollapsed = true
@@ -454,6 +476,18 @@ const sendMessage = (ragUrl: string) => {
       return
     }
 
+    if (eventName === 'thinking') {
+      try {
+        const thinkingData = JSON.parse(rawData)
+        reactiveMessage.cotContent = thinkingData.content || ''
+        reactiveMessage.cotCollapsed = false  // 首次收到时展开，让用户看到
+        scrollToBottom()
+      } catch (e) {
+        // JSON解析失败，静默忽略
+      }
+      return
+    }
+
   }, (error) => {
     window.console.error('Error:', error)
     reactiveMessage.content = '抱歉，发生了错误，请稍后重试。'
@@ -474,6 +508,11 @@ const sendMessage = (ragUrl: string) => {
 /** 切换单条消息的步骤折叠状态 */
 function toggleMessageSteps(message: ChatMessage) {
   message.stepsCollapsed = !message.stepsCollapsed
+}
+
+/** 切换 CoT 深度思考块的折叠状态 */
+function toggleCot(message: any) {
+  message.cotCollapsed = !message.cotCollapsed
 }
 
 const scrollToBottom = () => {
@@ -799,6 +838,58 @@ onMounted(() => {
   border-radius: 8px;
   flex-shrink: 0;
   font-family: Consolas, Monaco, monospace;
+}
+
+/* ===== CoT 深度思考折叠块 ===== */
+.cot-block {
+  width: 100%;
+  max-width: 600px;
+  background: #faf9f6;
+  border: 1px solid #e8e4dc;
+  border-radius: 8px;
+  padding: 0;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+.cot-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  color: #8b7355;
+  font-weight: 500;
+
+  &:hover {
+    background: #f5f0e8;
+  }
+}
+
+.cot-body {
+  padding: 10px 14px;
+  border-top: 1px solid #e8e4dc;
+  animation: cotExpand 0.2s ease;
+}
+
+@keyframes cotExpand {
+  from { opacity: 0; max-height: 0; }
+  to   { opacity: 1; max-height: 600px; }
+}
+
+.cot-text {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #6b5e4e;
+  font-family: inherit;
+  border: none;
+  overflow-x: visible;
 }
 
 /* ===== 答案气泡底部耗时 ===== */

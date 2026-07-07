@@ -65,8 +65,15 @@ public class IntentClassifyNode {
         }
         String historyText = formatHistory(historyMessages);
 
-        // L1: 关键词快速路由（0 token）
-        IntentClassifier.ClassifyResult result = keywordClassifier.classify(question);
+        // L1: 关键词快速路由（0 token），仅首轮无历史时启用
+        // 多轮对话中 follow-up 消息的意图高度依赖上下文（如"那你帮我算一下嘛"），
+        // 关键词无法准确判断，交由 L2 LLM 结合历史做分类
+        IntentClassifier.ClassifyResult result;
+        if (historyMessages != null && !historyMessages.isEmpty()) {
+            result = null; // 有对话历史 → 跳过L1关键词
+        } else {
+            result = keywordClassifier.classify(question);
+        }
         if (result == null) {
             // L2: LLM兜底（~200 token，带对话历史）
             result = llmClassifier.classify(question, historyText);
@@ -110,16 +117,17 @@ public class IntentClassifyNode {
         String targetMcpServer = validateAndCorrectMcpServer(
                 result.getTargetMcpServer(), question);
 
-        log.info("[IntentClassify] question='{}', category={}, layer={}, tokenUsed={}, emotion={}, toolConfirm={}, targetMcpServer={}, historyMsg={}",
+        log.info("[IntentClassify] question='{}', category={}, layer={}, tokenUsed={}, emotion={}, toolConfirm={}, targetMcpServer={}, answerType={}, historyMsg={}",
                 question.length() > 40 ? question.substring(0, 40) + "..." : question,
                 category, result.getLayer(), result.getTokenUsed(), result.getEmotion(),
-                finalToolConfirm, targetMcpServer, historyMessages.size());
+                finalToolConfirm, targetMcpServer, result.getAnswerType(), historyMessages.size());
 
         Map<String, Object> resultMap = new java.util.HashMap<>();
         resultMap.put(StateKeys.CATEGORY, category);
         resultMap.put(StateKeys.EMOTION, result.getEmotion());
         resultMap.put(StateKeys.TOOL_CONFIRM, finalToolConfirm);
-        resultMap.put(StateKeys.STEPS, "意图分类完成: " + category + " (" + result.getLayer() + ")");
+        resultMap.put(StateKeys.ANSWER_TYPE, result.getAnswerType());
+        resultMap.put(StateKeys.STEPS, "意图分类完成: " + category + " (" + result.getLayer() + "), answerType=" + result.getAnswerType());
         // 写入目标MCP服务名（已校验纠偏）
         if (targetMcpServer != null && !targetMcpServer.isEmpty()) {
             resultMap.put(StateKeys.TARGET_MCP_SERVER, targetMcpServer);
@@ -128,9 +136,10 @@ public class IntentClassifyNode {
     }
 
     /**
-     * 校验并纠偏 LLM 返回的 targetMcpServer
+     * 校验 LLM 返回的 targetMcpServer 是否为真实启用的服务名。
      * <p>LLM 可能编造不存在的服务名（如 map-service），
-     * 此方法查询数据库中的真实启用服务列表进行校验。</p>
+     * 此方法查询数据库中的真实启用服务列表进行校验，
+     * 命中则通过，未命中则清空交由下游 McpToolCallNode 加载全部工具做智能匹配。</p>
      */
     private String validateAndCorrectMcpServer(String llmServer, String question) {
         if (llmServer == null || llmServer.trim().isEmpty()) {
@@ -158,49 +167,12 @@ public class IntentClassifyNode {
             return llmServer;
         }
 
-        // 未命中：LLM编造的服务名，尝试关键词纠偏
-        log.warn("[IntentClassify] LLM返回了不存在的服务名 [{}]，尝试关键词纠偏", llmServer);
-
-        String corrected = correctByKeyword(llmServer, question, validNames);
-        if (corrected != null) {
-            log.info("[IntentClassify] 关键词纠偏成功: {} → {}", llmServer, corrected);
-            return corrected;
-        }
-
-        // 无法纠偏 → 清空，由 McpToolCallNode 的 matchServerByKeyword 兜底
-        log.warn("[IntentClassify] 无法纠偏，清空 targetMcpServer，交由 McpToolCallNode 关键词兜底");
+        // 未命中：LLM编造的服务名，清空交由 McpToolCallNode 加载全部工具智能匹配
+        log.warn("[IntentClassify] LLM返回了不存在的服务名 [{}]，清空 targetMcpServer，"
+                + "交由 McpToolCallNode 加载全部工具", llmServer);
         return "";
     }
 
-    /**
-     * 关键词纠偏：从LLM编造的服务名和用户问题中提取特征词，匹配真实服务名
-     */
-    private String correctByKeyword(String llmServer, String question, Set<String> validNames) {
-        String combined = (question + " " + llmServer).toLowerCase();
-
-        // 地图/路线/导航相关 → 匹配含 "map"/"amap"/"geo"/"高德" 的服务名
-        if (combined.matches(".*(地图|路线|导航|距离|多远|多久|开车|map|geo|amap|高德).*")) {
-            for (String name : validNames) {
-                String lower = name.toLowerCase();
-                if (lower.contains("map") || lower.contains("amap") || lower.contains("geo")
-                        || lower.contains("地图") || lower.contains("高德")) {
-                    return name;
-                }
-            }
-        }
-
-        // 考勤/HR/业务 → 匹配含 "local"/"ziniu"/"紫牛" 的服务名
-        if (combined.matches(".*(考勤|请假|入职|离职|薪资|工资|审批|ziniu|紫牛|local).*")) {
-            for (String name : validNames) {
-                String lower = name.toLowerCase();
-                if (lower.contains("local") || lower.contains("ziniu") || lower.contains("紫牛")) {
-                    return name;
-                }
-            }
-        }
-
-        return null;
-    }
 
     /**
      * 将 Message 列表格式化为文本（用户/助手对话）

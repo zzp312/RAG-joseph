@@ -58,26 +58,32 @@ public interface IntentClassifier {
         private final String emotion; // positive/neutral/negative, L1默认neutral
         private final boolean toolConfirm; // 用户是否确认调用工具（operation类意图时有意义）
         private final String targetMcpServer; // 目标MCP服务名（intent=operation时由LLM识别，无法判断则为null）
+        private final String answerType; // 答案形态：single_value/list/boolean/description/comparison
 
         public ClassifyResult(Category category, String layer, int tokenUsed) {
-            this(category, layer, tokenUsed, "neutral", false, null);
+            this(category, layer, tokenUsed, "neutral", false, null, "description");
         }
 
         public ClassifyResult(Category category, String layer, int tokenUsed, String emotion) {
-            this(category, layer, tokenUsed, emotion, false, null);
+            this(category, layer, tokenUsed, emotion, false, null, "description");
         }
 
         public ClassifyResult(Category category, String layer, int tokenUsed, String emotion, boolean toolConfirm) {
-            this(category, layer, tokenUsed, emotion, toolConfirm, null);
+            this(category, layer, tokenUsed, emotion, toolConfirm, null, "description");
         }
 
         public ClassifyResult(Category category, String layer, int tokenUsed, String emotion, boolean toolConfirm, String targetMcpServer) {
+            this(category, layer, tokenUsed, emotion, toolConfirm, targetMcpServer, "description");
+        }
+
+        public ClassifyResult(Category category, String layer, int tokenUsed, String emotion, boolean toolConfirm, String targetMcpServer, String answerType) {
             this.category = category;
             this.layer = layer;
             this.tokenUsed = tokenUsed;
             this.emotion = emotion;
             this.toolConfirm = toolConfirm;
             this.targetMcpServer = targetMcpServer;
+            this.answerType = answerType;
         }
 
         public Category getCategory() {
@@ -104,11 +110,16 @@ public interface IntentClassifier {
             return targetMcpServer;
         }
 
+        public String getAnswerType() {
+            return answerType;
+        }
+
         @Override
         public String toString() {
             return "ClassifyResult{category=" + category + ", layer=" + layer + ", tokenUsed=" + tokenUsed
                     + ", emotion=" + emotion + ", toolConfirm=" + toolConfirm
-                    + ", targetMcpServer=" + targetMcpServer + "}";
+                    + ", targetMcpServer=" + targetMcpServer
+                    + ", answerType=" + answerType + "}";
         }
     }
 

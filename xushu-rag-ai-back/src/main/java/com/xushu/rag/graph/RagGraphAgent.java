@@ -136,7 +136,7 @@ public class RagGraphAgent {
             StateKeys.KB_IDS, StateKeys.SOURCES, StateKeys.EFFECTIVE_KB_ID,
             StateKeys.CONVERSATION_ID, StateKeys.DOCUMENTS, StateKeys.CONTEXT,
             StateKeys.ANSWER, StateKeys.STEPS, StateKeys.STEP_TYPE,
-            StateKeys.SUB_QUERIES,
+            StateKeys.SUB_QUERIES, StateKeys.COT_ANALYSIS,
             StateKeys.EMOTION, StateKeys.ESCALATE, StateKeys.MCP_RESULT, StateKeys.TOKEN_USAGE,
             StateKeys.CANCELLED, StateKeys.TOOL_CONFIRM,
             StateKeys.TARGET_MCP_SERVER

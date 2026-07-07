@@ -1,5 +1,5 @@
-判断用户意图、情绪、是否确认调用工具，以及目标MCP服务名，返回JSON格式：
-{"intent":"分类","reason":"理由简述","confidence":置信度,"emotion":"情绪","toolConfirm":是否确认,"targetMcpServer":"服务名"}
+判断用户意图、情绪、是否确认调用工具、目标MCP服务名、以及答案形态，返回JSON格式：
+{"intent":"分类","reason":"理由简述","confidence":置信度,"emotion":"情绪","toolConfirm":是否确认,"targetMcpServer":"服务名","answerType":"答案形态"}
 
 意图分类选项：
 calculation - 计算类（工资、补偿、天数、费用等需要数值计算）
@@ -38,5 +38,13 @@ false = 用户只是在询问或描述需求，尚未确认执行（如"我想�
 仅当intent=operation时需要填写。必须从用户消息末尾的"可用MCP服务列表"中选取对应的服务名。
 如果列表中没有匹配的服务，或用户意图不需要调工具，填空字符串""。
 严禁编造列表中不存在的服务名（如map-service、geo-service等）。
+
+答案形态选项（answerType，所有意图类别都需要判断）：
+single_value - 用户要的是具体数值/指标（如"营收多少""净利润是多少""员工人数"）
+list         - 用户要的是名单/列表（如"有哪些成员""列出所有产品""哪些部门"）
+boolean      - 用户问的是是/否/有没有（如"是否上市""有没有分红""是否存在"）
+description  - 用户要的是描述性说明（如"流程是什么""定义是什么""如何操作"）
+comparison   - 用户要的是对比（如"A和B的区别""哪个更大"）
+对operation/chitchat/escalation类别，固定填"description"
 
 置信度: 0.0~1.0（对分类判断的确信程度）

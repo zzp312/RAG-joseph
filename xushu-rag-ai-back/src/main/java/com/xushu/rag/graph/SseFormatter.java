@@ -62,6 +62,22 @@ public final class SseFormatter {
     }
 
     /**
+     * 生成 thinking 事件（CoT 深度思考过程）
+     * <p>前端解析后渲染为可折叠的"💭 深度思考"区块</p>
+     *
+     * @param cotContent CoT 推理文本
+     * @return SSE 事件，data 为 JSON
+     */
+    public static ServerSentEvent<String> thinking(String cotContent) {
+        JSONObject json = new JSONObject();
+        json.put("content", cotContent == null ? "" : cotContent);
+        return ServerSentEvent.<String>builder()
+                .event("thinking")
+                .data(json.toJSONString())
+                .build();
+    }
+
+    /**
      * 生成 divider 分界线事件（人工接管/回AI）
      *
      * @param type    分界线类型：human_start / human_end

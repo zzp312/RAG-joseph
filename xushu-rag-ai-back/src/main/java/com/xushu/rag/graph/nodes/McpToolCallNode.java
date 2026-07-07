@@ -12,13 +12,15 @@ import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 /**
- * MCP工具调用Node（真实调用）
- * <p>根据用户请求精准匹配目标MCP服务，只将目标服务的工具传给LLM，
- * 避免LLM自由选工具导致调用错误的服务或工具调用失败后fallback到其他工具</p>
+ * MCP工具调用Node（真实调用，支持多轮工具链式调用）
+ * <p>根据用户请求精准匹配目标MCP服务，加载工具交由LLM多轮迭代选择，
+ * 每轮工具执行结果追加到上下文后让LLM判断是否需要继续调用下一个工具，
+ * 最多循环5轮防止无限调用。</p>
  *
  * @author Joseph
  */
@@ -27,6 +29,12 @@ import java.util.Map;
 public class McpToolCallNode {
 
     private static final int CHAT_MEMORY_RESPONSE_SIZE = 10;
+
+    /** 工具调用循环最大轮次 */
+    private static final int MAX_TOOL_ROUNDS = 5;
+
+    /** 工具调用上下文累计最大字符数（防止token爆炸） */
+    private static final int MAX_TOOL_CONTEXT_CHARS = 8000;
 
     private final ChatClient chatClient;
     private final McpClientManager mcpClientManager;
@@ -44,157 +52,171 @@ public class McpToolCallNode {
         String question = (String) state.getOrDefault(StateKeys.QUESTION, "");
         this.conversationId = (String) state.getOrDefault(StateKeys.CONVERSATION_ID, "default");
 
-        // 1. 确定目标MCP服务（优先state指定，其次关键词匹配）
+        // 1. 确定目标MCP服务、加载工具
         String targetServer = resolveTargetServer(state, question);
-
-        // 2. 只加载目标服务的工具
-        Map<String, List<McpSchema.Tool>> tools;
-        if (targetServer != null && !targetServer.isEmpty()) {
-            List<McpSchema.Tool> serverTools = mcpClientManager.getTools(targetServer);
-            if (serverTools == null || serverTools.isEmpty()) {
-                String msg = "指定的MCP服务 [" + targetServer + "] 无可用工具，请检查服务配置。";
-                log.warn("[McpToolCall] {}", msg);
-                return Map.of(
-                        StateKeys.MCP_RESULT, msg,
-                        StateKeys.ANSWER, msg,
-                        StateKeys.STEPS, "MCP工具调用: 目标服务无可用工具");
-            }
-            tools = Map.of(targetServer, serverTools);
-            log.info("[McpToolCall] 已锁定目标服务: {}, 工具数: {}", targetServer, serverTools.size());
-        } else {
-            tools = mcpClientManager.getAllTools();
-            if (tools.isEmpty()) {
-                String msg = "暂无可用的MCP工具服务，请联系管理员配置。";
-                return Map.of(
-                        StateKeys.MCP_RESULT, msg,
-                        StateKeys.ANSWER, msg,
-                        StateKeys.STEPS, "MCP工具调用: 无可用工具");
-            }
-            log.info("[McpToolCall] 未指定目标服务，加载全部可用工具: {}", tools.keySet());
+        Map<String, List<McpSchema.Tool>> tools = loadTools(targetServer);
+        if (tools == null) {
+            return Map.of(
+                    StateKeys.MCP_RESULT, "无可用MCP工具",
+                    StateKeys.ANSWER, "暂无可用的MCP工具服务，请联系管理员配置。",
+                    StateKeys.STEPS, "MCP工具调用: 无可用工具");
         }
 
-        // 3. 构建提示词（只含目标服务的工具）
+        // 2. 多轮工具调用循环
+        StringBuilder toolCtx = new StringBuilder();
+        toolCtx.append("用户请求：").append(question).append("\n");
         String systemPrompt = buildSystemPrompt(tools, targetServer);
-        String userPrompt = "用户请求：" + question + "\n\n请根据上方工具列表，选择合适的工具执行操作。";
+        List<String> calledTools = new ArrayList<>();
 
-        try {
-            String answer = chatClient.prompt()
+        for (int round = 1; round <= MAX_TOOL_ROUNDS; round++) {
+            log.info("[McpToolCall] 第{}轮工具调用, toolCtx={}字", round, toolCtx.length());
+
+            String llmResponse = chatClient.prompt()
                     .system(systemPrompt)
-                    .user(userPrompt)
+                    .user(toolCtx.toString()
+                            + "\n请选择下一个工具执行（输出JSON），或如果任务已完成请直接回复用户。")
                     .advisors(a -> a
                             .param(ChatMemory.CONVERSATION_ID, this.conversationId)
                             .param("chat_memory_response_size", CHAT_MEMORY_RESPONSE_SIZE))
                     .call()
                     .content();
 
-            // 4. 解析LLM输出的工具调用JSON并执行
-            McpToolCallResult toolResult = tryExecuteToolCall(answer, tools);
-
-            if (toolResult != null) {
-                log.info("[McpToolCall] 工具调用成功, tool={}", toolResult.toolName);
-                String naturalAnswer = formatToolResult(toolResult.toolName, toolResult.result, question);
-                return Map.of(
-                        StateKeys.MCP_RESULT, toolResult.result,
-                        StateKeys.ANSWER, naturalAnswer,
-                        StateKeys.STEPS, "MCP工具调用成功: " + toolResult.toolName);
+            if (llmResponse == null || llmResponse.trim().isEmpty()) {
+                return emptyResult();
             }
 
-            // 5. LLM未输出工具调用JSON，返回其直接回答
-            return Map.of(
-                    StateKeys.MCP_RESULT, answer,
-                    StateKeys.ANSWER, answer,
-                    StateKeys.STEPS, "MCP工具调用: 未触发工具");
+            // 尝试解析工具调用JSON
+            McpToolCallResult toolResult = tryExecuteToolCall(llmResponse, tools);
 
-        } catch (Exception e) {
-            log.error("[McpToolCall] 调用失败: {}", e.getMessage(), e);
-            return Map.of(
-                    StateKeys.MCP_RESULT, "MCP工具调用异常: " + e.getMessage(),
-                    StateKeys.ANSWER, "抱歉，工具调用出了点问题，请稍后重试。",
-                    StateKeys.STEPS, "MCP工具调用异常");
+            if (toolResult == null) {
+                // LLM 没有输出工具调用JSON → 认为已完成，返回其直接回答
+                log.info("[McpToolCall] 第{}轮LLM未输出工具调用，返回最终答案", round);
+                String naturalAnswer = formatToolResult("", llmResponse, question);
+                return Map.of(
+                        StateKeys.MCP_RESULT, toolCtx.toString(),
+                        StateKeys.ANSWER, naturalAnswer,
+                        StateKeys.STEPS, buildToolSteps(calledTools));
+            }
+
+            // 有工具调用 → 执行并追加结果
+            log.info("[McpToolCall] 第{}轮执行工具: {}", round, toolResult.toolName);
+            calledTools.add(toolResult.toolName);
+            toolCtx.append("\n[已调用工具: ").append(toolResult.toolName).append("]");
+            toolCtx.append("\n[工具返回: ").append(truncateResult(toolResult.result))
+                    .append("]\n");
+
+            // 上下文超长保护 → 强制LLM基于现有信息给出最终答案
+            if (toolCtx.length() > MAX_TOOL_CONTEXT_CHARS) {
+                log.warn("[McpToolCall] 工具上下文超长({}字)，强制LLM输出最终答案", toolCtx.length());
+                String forcedAnswer = forceFinalAnswer(systemPrompt, toolCtx.toString(), question);
+                return Map.of(
+                        StateKeys.MCP_RESULT, toolCtx.toString(),
+                        StateKeys.ANSWER, forcedAnswer,
+                        StateKeys.STEPS, buildToolSteps(calledTools));
+            }
         }
+
+        // 超过最大轮次 → 强制LLM给出最终答案
+        log.warn("[McpToolCall] 达到最大轮次{}，强制LLM输出最终答案", MAX_TOOL_ROUNDS);
+        String forcedAnswer = forceFinalAnswer(systemPrompt, toolCtx.toString(), question);
+        return Map.of(
+                StateKeys.MCP_RESULT, toolCtx.toString(),
+                StateKeys.ANSWER, forcedAnswer,
+                StateKeys.STEPS, buildToolSteps(calledTools));
     }
 
     /**
-     * 确定目标MCP服务名
-     * <p>优先级：state指定 > 关键词匹配 > null（返回全部）
+     * 确定目标MCP服务名。
+     * <p>state 中已指定（由 IntentClassifyNode 或前端写入）则直接用；
+     * 未指定时返回 null，下游加载全部工具由 LLM 根据描述自行选择。</p>
      */
     private String resolveTargetServer(Map<String, Object> state, String question) {
-        // 方式1：state中已指定（由IntentClassifyNode或前端写入）
         String fromState = (String) state.get(StateKeys.TARGET_MCP_SERVER);
         if (fromState != null && !fromState.isEmpty()) {
             log.info("[McpToolCall] 从state读取目标服务: {}", fromState);
             return fromState;
         }
-
-        // 方式2：按问题关键词匹配服务名/工具名（简单启发式兜底）
-        String matched = matchServerByKeyword(question);
-        if (matched != null) {
-            log.info("[McpToolCall] 关键词匹配到目标服务: {}, question={}", matched, question);
-            return matched;
-        }
-
         return null;
     }
 
     /**
-     * 按问题关键词匹配最可能的MCP服务（启发式兜底）
+     * 加载工具列表。指定服务则只加载该服务，否则加载全部。
+     * @return 工具列表，无可用工具时返回 null
      */
-    private String matchServerByKeyword(String question) {
-        String q = question.toLowerCase();
-        Map<String, List<McpSchema.Tool>> allTools = mcpClientManager.getAllTools();
-        if (allTools.isEmpty()) return null;
-
-        // 服务名关键词映射（可按需扩展）
-        Map<String, String[]> serverKeywords = Map.of(
-                "amap-maps", new String[]{"高德", "地图", "导航", "路线", "地址", "poi", "amap"},
-                "ziniu-local-server", new String[]{"紫牛", "ziniu", "本地", "local"}
-        );
-
-        for (Map.Entry<String, String[]> entry : serverKeywords.entrySet()) {
-            String serverName = entry.getKey();
-            for (String kw : entry.getValue()) {
-                if (q.contains(kw) && allTools.containsKey(serverName)) {
-                    return serverName;
-                }
+    private Map<String, List<McpSchema.Tool>> loadTools(String targetServer) {
+        Map<String, List<McpSchema.Tool>> tools;
+        if (targetServer != null && !targetServer.isEmpty()) {
+            List<McpSchema.Tool> serverTools = mcpClientManager.getTools(targetServer);
+            if (serverTools == null || serverTools.isEmpty()) {
+                log.warn("[McpToolCall] 指定的MCP服务 [{}] 无可用工具", targetServer);
+                return null;
             }
-        }
-
-        // 工具名关键词匹配
-        for (Map.Entry<String, List<McpSchema.Tool>> entry : allTools.entrySet()) {
-            for (McpSchema.Tool tool : entry.getValue()) {
-                if (containsToolKeyword(q, tool)) {
-                    return entry.getKey();
-                }
+            tools = Map.of(targetServer, serverTools);
+            log.info("[McpToolCall] 已锁定目标服务: {}, 工具数: {}", targetServer, serverTools.size());
+        } else {
+            tools = mcpClientManager.getAllTools();
+            if (tools.isEmpty()) {
+                log.warn("[McpToolCall] 暂无可用的MCP工具服务");
+                return null;
             }
+            log.info("[McpToolCall] 未指定目标服务，加载全部可用工具: {}", tools.keySet());
         }
-
-        return null;
+        return tools;
     }
 
     /**
-     * 判断问题是否包含工具相关关键词
+     * 截断过长的工具返回结果，控制上下文膨胀。
      */
-    private boolean containsToolKeyword(String question, McpSchema.Tool tool) {
-        String toolName = tool.name().toLowerCase();
-        String desc = tool.description() != null ? tool.description().toLowerCase() : "";
+    private String truncateResult(String result) {
+        if (result == null || result.isEmpty()) return "无返回内容";
+        if (result.length() <= 2000) return result;
+        return result.substring(0, 2000) + "...[已截断，原文" + result.length() + "字]";
+    }
 
-        // 从toolName提取核心词匹配
-        String[] parts = toolName.split("[_\\-]");
-        for (String part : parts) {
-            if (part.length() >= 3 && question.contains(part)) {
-                return true;
-            }
+    /**
+     * 将已调用的工具名格式化为步骤展示字符串。
+     */
+    private String buildToolSteps(List<String> calledTools) {
+        if (calledTools.isEmpty()) {
+            return "MCP工具调用: 无工具被触发";
         }
-        // description关键词匹配
-        if (!desc.isEmpty()) {
-            String[] qWords = question.split("\\s+");
-            for (String w : qWords) {
-                if (w.length() >= 2 && desc.contains(w)) {
-                    return true;
-                }
-            }
+        StringBuilder sb = new StringBuilder("MCP工具调用: ");
+        for (int i = 0; i < calledTools.size(); i++) {
+            if (i > 0) sb.append(" → ");
+            sb.append(calledTools.get(i));
         }
-        return false;
+        return sb.toString();
+    }
+
+    /**
+     * 空结果兜底。
+     */
+    private Map<String, Object> emptyResult() {
+        return Map.of(
+                StateKeys.MCP_RESULT, "",
+                StateKeys.ANSWER, "抱歉，暂时无法处理您的请求。",
+                StateKeys.STEPS, "MCP工具调用: 无响应");
+    }
+
+    /**
+     * 强制LLM基于当前工具执行上下文给出最终答案。
+     */
+    private String forceFinalAnswer(String systemPrompt, String toolContext, String question) {
+        String prompt = "你是工具调用助手。以下是已执行的工具调用及结果：\n\n"
+                + toolContext + "\n\n"
+                + "请基于上述工具执行的结果，用自然语言回答用户的原始问题。\n"
+                + "不要建议调用新工具。如果信息不足，请告知用户当前已知的信息。";
+        try {
+            return chatClient.prompt()
+                    .system(prompt)
+                    .user("用户原始问题：" + question)
+                    .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, conversationId))
+                    .call()
+                    .content();
+        } catch (Exception e) {
+            log.error("[McpToolCall] 强制输出最终答案失败: {}", e.getMessage());
+            return "工具执行完成，但整理结果时出现错误，请稍后重试。";
+        }
     }
 
     /**
@@ -309,9 +331,13 @@ public class McpToolCallNode {
     }
 
     /**
-     * 让 LLM 把工具结果整理成自然语言
+     * 让 LLM 把工具结果整理成自然语言。
+     * <p>当 toolName 为空时（LLM 直接输出最终回答），直接返回原文本。</p>
      */
     private String formatToolResult(String toolName, String rawResult, String question) {
+        if (toolName == null || toolName.isEmpty()) {
+            return rawResult;
+        }
         try {
             String systemPrompt = "你是Joseph.zhou知识库系统的助手，负责把工具返回的数据整理成自然、友好的中文回答。\n"
                     + "要求：\n"
