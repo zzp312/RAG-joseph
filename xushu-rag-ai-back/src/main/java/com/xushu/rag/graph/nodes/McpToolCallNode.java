@@ -36,6 +36,13 @@ public class McpToolCallNode {
     /** 工具调用上下文累计最大字符数（防止token爆炸） */
     private static final int MAX_TOOL_CONTEXT_CHARS = 8000;
 
+    /** 工具返回内容中的业务错误关键词（MCP层面成功但内容为业务错误） */
+    private static final String[] TOOL_ERROR_KEYWORDS = {
+            "token过期", "token无效", "token已过期", "登录已过期", "登录过期",
+            "请重新登录", "认证失败", "鉴权失败", "权限不足", "无权限",
+            "Unauthorized", "Forbidden", "Access Denied"
+    };
+
     private final ChatClient chatClient;
     private final McpClientManager mcpClientManager;
     private String conversationId;
@@ -89,18 +96,38 @@ public class McpToolCallNode {
             McpToolCallResult toolResult = tryExecuteToolCall(llmResponse, tools);
 
             if (toolResult == null) {
-                // LLM 没有输出工具调用JSON → 认为已完成，返回其直接回答
-                log.info("[McpToolCall] 第{}轮LLM未输出工具调用，返回最终答案", round);
-                String naturalAnswer = formatToolResult("", llmResponse, question);
+                // LLM 没有输出工具调用JSON → 已完成
+                log.info("[McpToolCall] 第{}轮LLM未输出工具调用", round);
+                // 如果之前调用过工具，强制走 NL 格式化，避免 LLM 直接 echo JSON
+                String answer;
+                if (!calledTools.isEmpty()) {
+                    answer = forceFinalAnswer(systemPrompt, toolCtx.toString(), question);
+                } else {
+                    answer = llmResponse;
+                }
                 return Map.of(
                         StateKeys.MCP_RESULT, toolCtx.toString(),
-                        StateKeys.ANSWER, naturalAnswer,
+                        StateKeys.ANSWER, answer,
                         StateKeys.STEPS, buildToolSteps(calledTools));
             }
 
             // 有工具调用 → 执行并追加结果
             log.info("[McpToolCall] 第{}轮执行工具: {}", round, toolResult.toolName);
             calledTools.add(toolResult.toolName);
+
+            // 工具调用失败 → 立即刹车，不允许LLM尝试其他工具
+            // 避免因一个工具报错而触发其他无关工具（如token过期后误调createCustomer）
+            if (toolResult.isError || isToolResultBusinessError(toolResult.result)) {
+                log.warn("[McpToolCall] 工具 [{}] 执行失败，停止调用链: {}", toolResult.toolName,
+                        toolResult.result.length() > 200
+                                ? toolResult.result.substring(0, 200) : toolResult.result);
+                return Map.of(
+                        StateKeys.MCP_RESULT, toolCtx.toString(),
+                        StateKeys.ANSWER, "工具 [" + toolResult.toolName + "] 调用失败："
+                                + toolResult.result,
+                        StateKeys.STEPS, buildToolSteps(calledTools) + " [已中断]");
+            }
+
             toolCtx.append("\n[已调用工具: ").append(toolResult.toolName).append("]");
             toolCtx.append("\n[工具返回: ").append(truncateResult(toolResult.result))
                     .append("]\n");
@@ -171,6 +198,20 @@ public class McpToolCallNode {
         if (result == null || result.isEmpty()) return "无返回内容";
         if (result.length() <= 2000) return result;
         return result.substring(0, 2000) + "...[已截断，原文" + result.length() + "字]";
+    }
+
+    /**
+     * 检测工具返回内容是否包含业务错误（MCP层面成功但内容为业务错误，如token过期）。
+     */
+    private boolean isToolResultBusinessError(String result) {
+        if (result == null || result.isEmpty()) return false;
+        String lower = result.toLowerCase();
+        for (String kw : TOOL_ERROR_KEYWORDS) {
+            if (lower.contains(kw.toLowerCase())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -266,7 +307,14 @@ public class McpToolCallNode {
                 return null;
             }
 
-            JSONObject call = JSON.parseObject(json);
+            JSONObject call;
+            try {
+                call = JSON.parseObject(json);
+            } catch (Exception jsonEx) {
+                // JSON解析失败（如LLM输出中混入了上轮工具结果导致多段JSON拼接）
+                log.warn("[McpToolCall] JSON解析失败，视为无工具调用: {}", jsonEx.getMessage());
+                return null;
+            }
             String serverName = call.getString("server_name");
             String toolName = call.getString("tool_name");
             Map<String, Object> arguments = call.getObject("arguments", Map.class);
@@ -280,7 +328,7 @@ public class McpToolCallNode {
             if (!allowedTools.containsKey(serverName)) {
                 String err = "服务 [" + serverName + "] 不在当前可用范围内，请只选择已列出的服务。";
                 log.warn("[McpToolCall] LLM选择了未授权的服务: {}", serverName);
-                return new McpToolCallResult(toolName, err);
+                return McpToolCallResult.error(toolName, err);
             }
 
             io.modelcontextprotocol.client.McpSyncClient client =
@@ -288,8 +336,12 @@ public class McpToolCallNode {
             if (client == null) {
                 String err = "服务 [" + serverName + "] 连接失败，该服务可能未启动或配置有误。";
                 log.warn("[McpToolCall] {}", err);
-                return new McpToolCallResult(toolName, err);
+                return McpToolCallResult.error(toolName, err);
             }
+
+            // ===== 【临时测试】服务端注入测试Token，测完删除 =====
+//            injectTestToken(serverName, arguments);
+            // =====================================================
 
             log.info("[McpToolCall] 执行工具: server={}, tool={}, args={}",
                     serverName, toolName, arguments);
@@ -311,11 +363,15 @@ public class McpToolCallNode {
 
             String finalResult = resultText.isEmpty() ? "工具执行完成，无返回内容。" : resultText.toString();
             log.info("[McpToolCall] 工具执行成功: tool={}, resultLen={}", toolName, finalResult.length());
-            return new McpToolCallResult(toolName, finalResult);
+            // MCP源数据日志（超3000字截断）
+            String rawLog = finalResult.length() > 3000
+                    ? finalResult.substring(0, 3000) + "...[已截断，全文" + finalResult.length() + "字]"
+                    : finalResult;
+            log.info("[McpToolCall] MCP返回源数据: tool={}\n{}", toolName, rawLog);
+            return McpToolCallResult.success(toolName, finalResult);
 
         } catch (Exception e) {
             log.error("[McpToolCall] 工具执行异常: {}", e.getMessage(), e);
-            // 修复：返回错误信息而非null，避免调用方fallback到其他工具
             String toolName = "unknown";
             try {
                 String json = extractJson(llmResponse);
@@ -326,43 +382,14 @@ public class McpToolCallNode {
                     }
                 }
             } catch (Exception ignored) {}
-            return new McpToolCallResult(toolName, "工具执行异常: " + e.getMessage());
+            return McpToolCallResult.error(toolName, "工具执行异常: " + e.getMessage());
         }
     }
 
     /**
-     * 让 LLM 把工具结果整理成自然语言。
-     * <p>当 toolName 为空时（LLM 直接输出最终回答），直接返回原文本。</p>
-     */
-    private String formatToolResult(String toolName, String rawResult, String question) {
-        if (toolName == null || toolName.isEmpty()) {
-            return rawResult;
-        }
-        try {
-            String systemPrompt = "你是Joseph.zhou知识库系统的助手，负责把工具返回的数据整理成自然、友好的中文回答。\n"
-                    + "要求：\n"
-                    + "1. 用自然语言回答用户问题，不要直接展示JSON\n"
-                    + "2. 提取关键信息并组织成清晰的文字\n"
-                    + "3. 可以用列表或分段让内容更易读\n"
-                    + "4. 简洁明了，不要编造工具结果中没有的信息";
-            String userPrompt = "用户问题：" + question + "\n\n"
-                    + "工具 " + toolName + " 返回的原始数据：\n" + rawResult + "\n\n"
-                    + "请把上述数据整理成自然语言回答用户。";
-
-            return chatClient.prompt()
-                    .system(systemPrompt)
-                    .user(userPrompt)
-                    .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, conversationId))
-                    .call()
-                    .content();
-        } catch (Exception e) {
-            log.error("[McpToolCall] 整理工具结果失败: {}", e.getMessage(), e);
-            return rawResult;
-        }
-    }
-
-    /**
-     * 从LLM回复中提取JSON块（支持 ```json 代码块 或 裸JSON）
+     * 从LLM回复中提取第一个完整JSON对象（括号配对匹配，而非简单取首尾大括号）。
+     * <p>LLM可能在同一回复中输出多段JSON（如工具调用+上轮结果数据），
+     * 取首尾大括号会把多个JSON对象拼成一个无效的字符串导致解析失败。</p>
      */
     private String extractJson(String text) {
         if (text == null || text.trim().isEmpty()) return null;
@@ -374,15 +401,52 @@ public class McpToolCallNode {
         }
         if (start == -1) return null;
 
-        int end = text.lastIndexOf("}");
-        if (end == -1 || end <= start) return null;
-
-        return text.substring(start, end + 1).trim();
+        // 括号配对：从第一个 { 开始，计数匹配 }
+        int depth = 0;
+        for (int i = start; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            if (ch == '{') depth++;
+            else if (ch == '}') {
+                depth--;
+                if (depth == 0) {
+                    return text.substring(start, i + 1).trim();
+                }
+            }
+        }
+        return null; // 配不上对，不是有效JSON
     }
 
     /**
      * 工具调用结果
      */
-    private record McpToolCallResult(String toolName, String result) {
+    private record McpToolCallResult(String toolName, String result, boolean isError) {
+        static McpToolCallResult success(String toolName, String result) {
+            return new McpToolCallResult(toolName, result, false);
+        }
+        static McpToolCallResult error(String toolName, String result) {
+            return new McpToolCallResult(toolName, result, true);
+        }
+    }
+
+    // ==================== 【临时测试逻辑，测完删除】 ====================
+
+    /** 需要注入测试Token的服务名 */
+    private static final String TEST_TOKEN_SERVER = "ziniu-local-sse";
+
+    /** 测试用Token——替换为你的实际JWT */
+    private static final String TEST_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiIxIiwidGVuYW50X25hbWUiOiLljaHmgJ3kvJjmtL4iLCJhY2NvdW50X3R5cGUiOiJzeXNfdXNlciIsInVzZXJfbmFtZSI6Imxlby53YW5nQHlwaHJzLmNvbSIsImRlcHRfbmFtZSI6IueZvemihuWkluWMhemhueebruS4gOe7hCIsImVuZ2xpc2hfbmFtZSI6ImxpYW5nbGlhbmctdyIsImNsaWVudF9pZCI6Inppbml1IiwidXNlcl9pZCI6IjE5NDQ2NDk1NjEyMTc4MzA5MTIiLCJzY29wZSI6WyJhbGwiXSwibmFtZSI6Imxlb-S6riIsImRlcHRfaWQiOiIxOTU1MTQ0NDAwNTQ4MDA3OTM2IiwiZXhwIjoxNzg0MDA5NDk4LCJqdGkiOiJiODVhZDI1Zi0zOWQwLTRlZmMtODZjMy1iMWM4ZWEwZDI3ZWMiLCJ1c2VybmFtZSI6Imxlby53YW5nQHlwaHJzLmNvbSIsInRlbmFudF9jb2RlIjoiQ1NDIn0.Iqct5a31yb4h-TC1NrGTQNwSkhbWWh-1f2UFMITESHM";
+
+    /**
+     * 临时测试：对指定服务名自动注入硬编码Token。
+     * 测完删除此方法和上方两个常量 + 调用处即可。
+     */
+    private static void injectTestToken(String serverName, Map<String, Object> arguments) {
+        if (!TEST_TOKEN_SERVER.equals(serverName)) {
+            return;
+        }
+        if (arguments == null) {
+            return;
+        }
+            arguments.put("token", TEST_TOKEN);
     }
 }
