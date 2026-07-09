@@ -30,7 +30,8 @@ public class SqlAssistantPrompt {
             3. If the provided context is insufficient, please explain why it can't be generated.
             4. Please use the most relevant table(s).
             5. If the question has been asked and answered before, please repeat the answer exactly as it was given before.
-            6. Ensure that the output SQL is SQL-compliant and executable, and free of syntax errors.
+            6. Ensure that the output SQL is MySQL-compatible and executable, and free of syntax errors.
+            7. Use MySQL syntax only: INTERVAL N DAY (not INTERVAL 'N days'), CURRENT_DATE (not CURRENT_DATE()), LIMIT (not FETCH), backticks for identifiers.
             """;
 
     private static final int MAX_LENGTH = 14000;

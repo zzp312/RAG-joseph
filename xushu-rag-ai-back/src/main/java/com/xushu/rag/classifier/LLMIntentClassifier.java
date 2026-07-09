@@ -48,6 +48,7 @@ public class LLMIntentClassifier implements IntentClassifier {
 
             情绪判断：positive/neutral/negative
             toolConfirm：仅intent=operation时需要判断，其他固定false
+            用户说"调用工具""使用工具""工具调用""用工具帮我"→ toolConfirm=true
             targetMcpServer：仅intent=operation时填写，必须从下方可用服务列表中选取，列表中不存在则填空
 
             {mcp_services_block}

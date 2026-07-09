@@ -144,7 +144,9 @@ public class TrainingPlanGenerator {
     }
 
     private static String generateDocumentation(List<Map<String, Object>> data, String table, String database, List<String> columns) {
-        StringBuilder doc = new StringBuilder("The following columns are in the " + table + " table in the " + database + " database:\n\n");
+        // MySQL 的 TABLE_CATALOG 固定为 def，无实际意义，且可能导致 LLM 生成 def.xxx 的三级 SQL
+        String dbRef = "def".equalsIgnoreCase(database) ? "" : (" in the " + database + " database");
+        StringBuilder doc = new StringBuilder("The following columns are in the " + table + " table" + dbRef + ":\n\n");
         for (Map<String, Object> row : data) {
             for (String column : columns) {
                 doc.append(column).append(": ").append(row.get(column)).append("\n");

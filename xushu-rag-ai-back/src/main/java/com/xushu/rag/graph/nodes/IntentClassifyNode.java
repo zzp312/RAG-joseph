@@ -81,7 +81,7 @@ public class IntentClassifyNode {
 
         String category = result.getCategory().getValue();
 
-        // 覆写：检测对比/聚合语义（QueryDecomposeNode 触发条件）
+        // 覆写：检测对比/聚合语义
         // 仅当 LLM 未分类为 operation，且 toolConfirm=false 时才允许关键词覆写
         // 避免将明确的操作类请求（如"查XX有哪些字段"）误判为 aggregation/comparison
         String q = question.toLowerCase();

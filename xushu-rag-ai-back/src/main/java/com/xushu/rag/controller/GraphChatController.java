@@ -191,8 +191,8 @@ public class GraphChatController {
                             return;
                         }
 
-                        // MCP工具调用 → 发送结果是TOOL步骤
-                        if ("mcp_tool_call".equals(nodeName)) {
+                        // 工具调用（本地 + 外部 MCP） → 发送结果是TOOL步骤
+                        if ("tool_call".equals(nodeName) || "mcp_tool_call".equals(nodeName) || "local_tool_call".equals(nodeName)) {
                             if (steps != null && !steps.isEmpty()) {
                                 tryEmitOrLog(sink, SseFormatter.step(StateKeys.StepType.TOOL, steps, nodeTs));
                             }

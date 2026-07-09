@@ -50,7 +50,7 @@ public class RagGraphAgent {
     private final LLMGenerateNode llmGenerateNode;
     private final QueryDecomposeNode queryDecomposeNode;
     private final EscalationNode escalationNode;
-    private final McpToolCallNode mcpToolCallNode;
+    private final ToolCallNode toolCallNode;
     private final ChatModel chatModel;
     /** SSE 回调专用线程池，避免回调阻塞 Graph 节点链路 */
     private final ThreadPoolExecutor graphCallbackExecutor;
@@ -63,7 +63,7 @@ public class RagGraphAgent {
                          LLMGenerateNode llmGenerateNode,
                          QueryDecomposeNode queryDecomposeNode,
                          EscalationNode escalationNode,
-                         McpToolCallNode mcpToolCallNode,
+                         ToolCallNode toolCallNode,
                          ChatModel chatModel,
                          @Qualifier("graphCallbackExecutor") ThreadPoolExecutor graphCallbackExecutor) {
         this.questionInputNode = questionInputNode;
@@ -74,7 +74,7 @@ public class RagGraphAgent {
         this.llmGenerateNode = llmGenerateNode;
         this.queryDecomposeNode = queryDecomposeNode;
         this.escalationNode = escalationNode;
-        this.mcpToolCallNode = mcpToolCallNode;
+        this.toolCallNode = toolCallNode;
         this.chatModel = chatModel;
         this.graphCallbackExecutor = graphCallbackExecutor;
     }
@@ -158,7 +158,7 @@ public class RagGraphAgent {
         addNode(stateGraph, "context_build", contextBuildNode, StateKeys.StepType.THINKING, nodeCallback);
         addNode(stateGraph, "llm_generate", llmGenerateNode, StateKeys.StepType.THINKING, nodeCallback);
         addNode(stateGraph, "escalation", escalationNode, StateKeys.StepType.THINKING, nodeCallback);
-        addNode(stateGraph, "mcp_tool_call", mcpToolCallNode, StateKeys.StepType.TOOL, nodeCallback);
+        addNode(stateGraph, "tool_call", toolCallNode, StateKeys.StepType.TOOL, nodeCallback);
     }
 
     /** 连接所有边（含情绪检测+转人工+MCP工具调用分支） */
@@ -175,14 +175,14 @@ public class RagGraphAgent {
                 state -> java.util.concurrent.CompletableFuture.completedFuture(
                         resolveIntentBranch(state.data())),
                 Map.of("escalation", "escalation",
-                        "mcp_tool_call", "mcp_tool_call",
+                        "tool_call", "tool_call",
                         "query_decompose", "query_decompose",
                         "prompt_route", "prompt_route"));
 
         // 转人工 → END
         stateGraph.addEdge("escalation", END);
-        // MCP工具调用 → END
-        stateGraph.addEdge("mcp_tool_call", END);
+        // 工具调用（本地 + 外部 MCP） → END
+        stateGraph.addEdge("tool_call", END);
         // 拆解 → prompt_route
         stateGraph.addEdge("query_decompose", "prompt_route");
 
@@ -212,15 +212,15 @@ public class RagGraphAgent {
             return "escalation";
         }
 
-        // ② 操作类：根据LLM判断的toolConfirm决定走向
+        // ② 操作类 → tool_call（LLM自主选择本地工具或外部MCP）
         if ("operation".equalsIgnoreCase(category)) {
             if (Boolean.TRUE.equals(toolConfirm)) {
-                return "mcp_tool_call";
+                return "tool_call";
             }
             return "prompt_route";
         }
 
-        // ③ 对比/汇总 → 拆解
+        // ③ comparison / aggregation → 拆解（A vs B 对比 / 统计汇总类）
         if ("comparison".equalsIgnoreCase(category)
                 || "aggregation".equalsIgnoreCase(category)) {
             return "query_decompose";
@@ -249,7 +249,7 @@ public class RagGraphAgent {
         else if (node instanceof LLMGenerateNode) fn = ((LLMGenerateNode) node)::apply;
         else if (node instanceof QueryDecomposeNode) fn = ((QueryDecomposeNode) node)::apply;
         else if (node instanceof EscalationNode) fn = ((EscalationNode) node)::apply;
-        else if (node instanceof McpToolCallNode) fn = ((McpToolCallNode) node)::apply;
+        else if (node instanceof ToolCallNode) fn = ((ToolCallNode) node)::apply;
         else throw new IllegalArgumentException("Unsupported node type: " + node.getClass());
 
         graph.addNode(name, (OverAllState state, RunnableConfig config) -> {

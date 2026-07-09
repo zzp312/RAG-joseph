@@ -17,17 +17,18 @@ public class RagTool {
     private SpringSqlEngine sqlEngine;
 
     @Autowired
+    @org.springframework.context.annotation.Lazy
     private ChatModel chatModel;
-    @Tool(description = "涉及统计数据、求和、计数、平均值等聚合操作")
+    @Tool(description = "涉及数据表查询，包括统计数据、求和、计数、平均值等聚合操作，或者用户直接提出查数据库的时候")
     public String getAggregationQuery(@ToolParam(description = "用户的提问") String question) {
-        // 是聚合对话
-        // 使用 SuperSQL 的 text-to-sql 功能生成实际的 SQL 查询
-        String actualSql=sqlEngine
+        String actualSql = sqlEngine
                 .setChatModel(chatModel)
                 .setOptions(RagOptions.builder().topN(10).rerank(false).limitScore(0.1).build())
                 .generateSql(question);
-            Object object = sqlEngine.executeSql(actualSql);
-
-        return JSON.toJSONString( object);
+        if (actualSql == null) {
+            return "{\"error\": \"generateSql returned null\"}";
+        }
+        Object object = sqlEngine.executeSql(actualSql.trim());
+        return JSON.toJSONString(object);
     }
 }
