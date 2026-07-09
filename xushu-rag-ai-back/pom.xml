@@ -204,6 +204,29 @@
             <version>0.16.0</version>
         </dependency>
 
+        <!-- Spring AI MCP Server: 对外暴露知识库工具（upload/search/list） -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-mcp-server-webmvc</artifactId>
+            <exclusions>
+                <!-- 排除自带 mcp-core，使用上方显式声明的 0.16.0 -->
+                <exclusion>
+                    <groupId>io.modelcontextprotocol.sdk</groupId>
+                    <artifactId>mcp-core</artifactId>
+                </exclusion>
+                <!-- 排除自带 mcp-spring-webmvc，手动引入 0.16.0 保持版本对齐 -->
+                <exclusion>
+                    <groupId>io.modelcontextprotocol.sdk</groupId>
+                    <artifactId>mcp-spring-webmvc</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>io.modelcontextprotocol.sdk</groupId>
+            <artifactId>mcp-spring-webmvc</artifactId>
+            <version>0.16.0</version>
+        </dependency>
+
 
     </dependencies>
 

@@ -292,7 +292,47 @@ super-sql:
 ```
 
 ---
+### MCP Server 知识库服务
 
+将知识库能力封装为 MCP Server，供外部 AI Agent 直接调用，实现「企业内部 Agent 注入知识库」的架构。
+
+#### 暴露的工具
+
+| 工具 | 说明 |
+|------|------|
+| `ask_knowledge` | 全流程 RAG 问答：意图分类 → 混合检索 → 上下文构建 → LLM 生成，返回自然语言回答 |
+| `list_knowledge_bases` | 列出所有知识库（含文档数量），支持分页 |
+| `upload_kb_file` | 通过 URL 上传文件到知识库，复用解析→切片→向量化全链路 |
+| `get_upload_status` | 查询异步上传任务进度 |
+
+#### 认证鉴权
+
+- MCP Server 端点和 REST 上传接口共用 `X-MCP-Secret-Key` 鉴权
+- `mcp_secret_key` 表支持多 key 共存，实现无感密钥轮换
+- 所有 MCP 调用异步写入 `mcp_call_log` 审计日志表
+- 页面 JWT 鉴权与 MCP 鉴权互不干扰，独立通道
+
+#### 接入方式
+
+在 Agent 客户端的 `mcp.json` 中配置：
+
+```json
+{
+  "mcpServers": {
+    "xushu-rag-kb": {
+      "url": "http://{host}:8989/mcp",
+      "type": "sse",
+      "headers": {
+        "X-MCP-Secret-Key": "{your_secret_key}"
+      }
+    }
+  }
+}
+```
+
+配合 `ziniu-rag` Skill 使用，实现企业微信文件自动入库、知识库智能问答。
+
+---
 ## 技术栈
 
 | 层级 | 技术选型 |

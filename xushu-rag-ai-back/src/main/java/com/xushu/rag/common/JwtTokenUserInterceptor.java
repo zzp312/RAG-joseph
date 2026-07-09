@@ -3,6 +3,8 @@ package com.xushu.rag.common;
 import com.xushu.rag.constant.JwtClaimsConstant;
 import com.xushu.rag.context.BaseContext;
 import com.xushu.rag.config.JwtProperties;
+import com.xushu.rag.entity.McpSecretKey;
+import com.xushu.rag.mapper.McpSecretKeyMapper;
 import com.xushu.rag.utils.JwtUtil;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.ExpiredJwtException;
@@ -25,6 +27,11 @@ public class JwtTokenUserInterceptor implements HandlerInterceptor {
     @Autowired
     private JwtProperties jwtProperties;
 
+    @Autowired
+    private McpSecretKeyMapper mcpSecretKeyMapper;
+
+    private static final String MCP_SECRET_KEY_HEADER = "X-MCP-Secret-Key";
+
     /**
      * 校验jwt
      *
@@ -35,10 +42,24 @@ public class JwtTokenUserInterceptor implements HandlerInterceptor {
      * @throws Exception
      */
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        String requestURI = request.getRequestURI();
+        String method = request.getMethod();
+
         //判断当前拦截到的是Controller的方法还是其他资源
         if (!(handler instanceof HandlerMethod)) {
             //当前拦截到的不是动态方法，直接放行
+            log.info("[JWT DEBUG] 非HandlerMethod放行: {} {} (handler={})", method, requestURI, handler.getClass().getSimpleName());
             return true;
+        }
+
+        // 0、X-MCP-Secret-Key 兜底：AI Agent通过REST调上传接口时，走MCP密钥鉴权，跳过JWT
+        String mcpSecretKey = request.getHeader(MCP_SECRET_KEY_HEADER);
+        if (mcpSecretKey != null && !mcpSecretKey.isEmpty()) {
+            McpSecretKey keyEntity = mcpSecretKeyMapper.selectActiveBySecretKey(mcpSecretKey);
+            if (keyEntity != null) {
+                request.setAttribute("callerSecretKeyId", keyEntity.getId());
+                return true;
+            }
         }
 
         //1、从请求头中获取令牌
@@ -50,7 +71,7 @@ public class JwtTokenUserInterceptor implements HandlerInterceptor {
 
         //2、校验令牌
         try {
-            log.info("jwt校验:{}", token);
+            log.info("[JWT DEBUG] 开始校验: {} {} | token={}", method, requestURI, token);
             Claims claims = JwtUtil.parseJWT(jwtProperties.getUserSecretKey(), token);
             Long userId = Long.valueOf(claims.get(JwtClaimsConstant.USER_ID).toString());
             log.info("当前用户的id：", userId);

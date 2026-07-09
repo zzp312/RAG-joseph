@@ -340,9 +340,8 @@ public class McpToolCallNode {
             }
 
             // ===== 【临时测试】服务端注入测试Token，测完删除 =====
-//            injectTestToken(serverName, arguments);
+            injectTestToken(serverName, arguments);
             // =====================================================
-
             log.info("[McpToolCall] 执行工具: server={}, tool={}, args={}",
                     serverName, toolName, arguments);
 

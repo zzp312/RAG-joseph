@@ -223,3 +223,65 @@ VALUES ('amap-maps', '高德地图服务：支持地理编码、路线规划、�
 INSERT INTO `mcp_server_config` (`server_name`, `description`, `server_category`, `config_json`, `disabled`)
 VALUES ('ziniu-local-server', '紫牛业务系统：支持公积金查询、员工信息查询、流程办理', 'operation',
         '{"url":"http://localhost:8081","type":"http"}', 0);
+
+-- ==================== MCP Server 暴露（Phase 5b） ====================
+
+-- Table: mcp_secret_key（MCP Server鉴权密钥表）
+DROP TABLE IF EXISTS `mcp_secret_key`;
+CREATE TABLE `mcp_secret_key` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `secret_key` VARCHAR(128) NOT NULL COMMENT 'MCP调用密钥',
+  `name` VARCHAR(100) DEFAULT NULL COMMENT '密钥名称/描述',
+  `status` VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' COMMENT '状态: ACTIVE/INACTIVE',
+  `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_secret_key` (`secret_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='MCP Server鉴权密钥表';
+
+-- Table: mcp_upload_task（MCP异步上传任务表）
+DROP TABLE IF EXISTS `mcp_upload_task`;
+CREATE TABLE `mcp_upload_task` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `task_id` VARCHAR(64) NOT NULL COMMENT '任务UUID',
+  `file_name` VARCHAR(500) NOT NULL COMMENT '文件名',
+  `file_size` BIGINT DEFAULT NULL COMMENT '文件大小(字节)',
+  `file_url` VARCHAR(1000) DEFAULT NULL COMMENT '文件URL(原始URL或OSS地址)',
+  `kb_id` BIGINT DEFAULT NULL COMMENT '目标知识库ID',
+  `kb_name` VARCHAR(200) DEFAULT NULL COMMENT '知识库名称',
+  `status` VARCHAR(20) NOT NULL DEFAULT 'PENDING' COMMENT '状态: PENDING/PROCESSING/SUCCESS/FAILED',
+  `stage` VARCHAR(30) DEFAULT NULL COMMENT '处理阶段: PARSING/CHUNKING/EMBEDDING/IMAGE_PROCESSING',
+  `progress` INT DEFAULT 0 COMMENT '进度0-100',
+  `error_message` TEXT DEFAULT NULL COMMENT '错误信息',
+  `error_stage` VARCHAR(30) DEFAULT NULL COMMENT '出错阶段',
+  `caller_secret_key_id` BIGINT DEFAULT NULL COMMENT '调用方密钥ID',
+  `vector_ids` TEXT DEFAULT NULL COMMENT '向量ID列表JSON',
+  `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `complete_time` DATETIME DEFAULT NULL COMMENT '完成时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_task_id` (`task_id`),
+  KEY `idx_status` (`status`),
+  KEY `idx_kb_id` (`kb_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='MCP异步上传任务表';
+
+-- Table: mcp_call_log（MCP调用审计日志表）
+DROP TABLE IF EXISTS `mcp_call_log`;
+CREATE TABLE `mcp_call_log` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `tool_name` VARCHAR(100) NOT NULL COMMENT '工具名称',
+  `caller_secret_key_id` BIGINT DEFAULT NULL COMMENT '调用方密钥ID',
+  `arguments` TEXT DEFAULT NULL COMMENT '调用参数(截断2000字符)',
+  `result` TEXT DEFAULT NULL COMMENT '返回结果(截断2000字符)',
+  `duration_ms` BIGINT DEFAULT NULL COMMENT '耗时(毫秒)',
+  `status` VARCHAR(20) NOT NULL COMMENT '状态: SUCCESS/FAILED',
+  `error_message` TEXT DEFAULT NULL COMMENT '错误信息',
+  `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_tool_name` (`tool_name`),
+  KEY `idx_create_time` (`create_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='MCP调用审计日志表';
+
+-- 初始密钥数据（开发测试用）
+INSERT INTO `mcp_secret_key` (`secret_key`, `name`, `status`) VALUES
+('ziniu-mcp-dev-key-2026', '开发测试密钥', 'ACTIVE');

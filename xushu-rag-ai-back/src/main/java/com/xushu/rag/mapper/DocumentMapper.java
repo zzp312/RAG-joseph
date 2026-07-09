@@ -22,4 +22,7 @@ public interface DocumentMapper extends BaseMapper<Document> {
 
     @Select("SELECT * FROM document WHERE id IN (SELECT MAX(id) FROM document WHERE kb_id = #{kbId} GROUP BY original_name)")
     List<Document> selectLatestVersionsByKbId(@Param("kbId") Long kbId);
+
+    @Select("SELECT COUNT(*) FROM document WHERE kb_id = #{kbId}")
+    int countByKbId(@Param("kbId") Long kbId);
 }

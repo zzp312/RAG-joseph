@@ -3,6 +3,8 @@ package com.xushu.rag.config;
 import com.alibaba.cloud.ai.advisor.RetrievalRerankAdvisor;
 import com.xushu.rag.common.ApplicationConstant;
 import com.xushu.rag.common.JwtTokenUserInterceptor;
+import jakarta.annotation.PostConstruct;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.transformer.splitter.TokenTextSplitter;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,6 +20,7 @@ import java.util.List;
  * @date 2025/2/8
  */
 
+@Slf4j
 @Configuration
 public class ApplicationConfig implements WebMvcConfigurer {
 
@@ -44,6 +47,12 @@ public class ApplicationConfig implements WebMvcConfigurer {
      * 注册拦截器
      * @param registry
      */
+    @PostConstruct
+    public void logInterceptorConfig() {
+        log.info("[JWT DEBUG] ApplicationConfig 初始化 | API_VERSION={} | 排除路径: /mcp/**, {}/user/login, {}/user/register, swagger",
+                ApplicationConstant.API_VERSION, ApplicationConstant.API_VERSION, ApplicationConstant.API_VERSION);
+    }
+
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         // 注册用户JWT拦截器
@@ -51,6 +60,10 @@ public class ApplicationConfig implements WebMvcConfigurer {
                 .addPathPatterns("/**") // 拦截所有请求
                 .excludePathPatterns(ApplicationConstant.API_VERSION+"/user/login") // 排除用户登录接口拦截所有请求
                 .excludePathPatterns(ApplicationConstant.API_VERSION+"/user/register") // 排除用户注册接口
-                .excludePathPatterns("/doc.html", "/webjars/**", "/swagger-resources/**", "/v3/api-docs/**"); // 排除Swagger相关路径
+                .excludePathPatterns("/doc.html", "/webjars/**", "/swagger-resources/**", "/v3/api-docs/**") // 排除Swagger相关路径
+                .excludePathPatterns("/mcp/**") // 排除MCP Server端点（由 McpSecretKeyAuthFilter 独立鉴权）
+                .excludePathPatterns(ApplicationConstant.API_VERSION + "/knowledge/file/mcp-upload") // MCP文件上传接口（走X-MCP-Secret-Key独立鉴权）
+                .excludePathPatterns("/error"); // 排除Spring Boot内部错误转发
+        log.info("[JWT DEBUG] JWT拦截器已注册，拦截 pattern: '/**', 排除 '/mcp/**'");
     }
 }
