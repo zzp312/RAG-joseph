@@ -16,6 +16,8 @@ import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * LLM生成Node
@@ -161,6 +163,9 @@ public class LLMGenerateNode {
 
             // 策略提取最终答案（结构化策略用 BeanOutputConverter，对话类原样返回）
             String answer = strategy.extractAnswer(rawOutput);
+            // 兜底：如果 LLM 意外输出了 JSON 包裹（如闲聊被误当结构化输出），
+            // 统一提取 finalAnswer 字段，确保用户永远看不到原始 JSON
+            answer = stripJsonWrapper(answer);
 
             // 澄清检测：LLM 在反问而非回答 → 强指令重新生成
             // （仅对非结构化输出做澄清检测，结构化 JSON 不会产生反问）
@@ -175,6 +180,7 @@ public class LLMGenerateNode {
                         .content();
                 if (reRaw != null && !reRaw.trim().isEmpty()) {
                     answer = strategy.extractAnswer(reRaw);
+                    answer = stripJsonWrapper(answer);
                     if (!isClarification(answer)) {
                         log.info("[LLMGenerate] 强指令重新生成成功, answer={}字", answer.length());
                     }
@@ -213,6 +219,39 @@ public class LLMGenerateNode {
     }
 
     // ========== 私有辅助 ==========
+
+    /**
+     * 兜底反 JSON 包装：如果答案以 <code>{"stepByStepAnalysis"...</code> 开头，
+     * 提取其中的 {@code finalAnswer} 字段作为最终答案，确保用户永远看不到原始 JSON。
+     * <p>这个方法不依赖任何 JSON 库，纯字符串正则提取，零依赖零开销。</p>
+     */
+    public static String stripJsonWrapper(String answer) {
+        if (answer == null || answer.length() < 10) {
+            return answer;
+        }
+        String trimmed = answer.trim();
+        // 必须以 { 开头且包含 "finalAnswer" 才处理，避免误杀普通文本
+        if (!trimmed.startsWith("{") || !trimmed.contains("\"finalAnswer\"")) {
+            return answer;
+        }
+        try {
+            Pattern p = Pattern.compile("\"finalAnswer\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+            Matcher m = p.matcher(trimmed);
+            if (m.find()) {
+                String extracted = m.group(1)
+                        .replace("\\\"", "\"")
+                        .replace("\\n", "\n")
+                        .replace("\\t", "\t")
+                        .replace("\\r", "\r");
+                log.info("[stripJsonWrapper] 从意外 JSON 输出中提取 finalAnswer, " +
+                        "原{}字 → 提取{}字", trimmed.length(), extracted.length());
+                return extracted;
+            }
+        } catch (Exception ignored) {
+            // 提取失败时降级返回原文，不阻塞主流程
+        }
+        return answer;
+    }
 
     /**
      * 打印最终组装好的提示词日志。

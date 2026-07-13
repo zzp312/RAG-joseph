@@ -31,7 +31,8 @@ public class ConversationalAnswerStrategy implements AnswerGenerationStrategy {
 
     @Override
     public String extractAnswer(String rawOutput) {
-        return rawOutput;
+        // 防御：如果 LLM 异常输出了 JSON，提取 finalAnswer 字段
+        return com.xushu.rag.graph.nodes.LLMGenerateNode.stripJsonWrapper(rawOutput);
     }
 
     @Override
