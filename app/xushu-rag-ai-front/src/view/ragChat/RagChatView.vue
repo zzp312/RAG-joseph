@@ -662,16 +662,38 @@ watch(selectedKbIds, (newIds) => {
   loadFilesByKbIds(newIds as number[])
 }, { deep: true })
 
-onMounted(() => {
-  messages.value.push({
-    role: 'assistant',
-    content: '你好！我是AI助手，请问有什么可以帮助你的吗？'
-  })
-
+onMounted(async () => {
   loadKnowledgeFiles()
   loadKnowledgeBases()
   // 加载历史会话列表
-  conversationStore.loadConversationList()
+  await conversationStore.loadConversationList()
+
+  if (conversationStore.conversationList.length > 0) {
+    // 默认进入最新（第一条）会话，直接调用 store 方法绕过 switchConversation 的同 ID 守卫
+    const firstConv = conversationStore.conversationList[0]
+    const restoredMessages = await conversationStore.switchToConversation(firstConv.conversationId)
+    messages.value = restoredMessages.length > 0
+      ? restoredMessages.map(m => ({
+          role: m.role,
+          content: m.content,
+          cotContent: (m as any).cotContent,
+          cotCollapsed: true,
+          stepsCollapsed: true,
+          stepsCompleted: true,
+        } as ChatMessage))
+      : [{
+          role: 'assistant',
+          content: '你好！我是AI助手，请问有什么可以帮助你的吗？'
+        } as ChatMessage]
+    scrollToBottom()
+  } else {
+    // 没有任何历史会话，显示欢迎消息，等待用户首次提问时后端懒创建
+    conversationStore.startNewConversation()
+    messages.value = [{
+      role: 'assistant',
+      content: '你好！我是AI助手，请问有什么可以帮助你的吗？'
+    } as ChatMessage]
+  }
 })
 
 // ========== 会话切换（Coze 式体验） ==========

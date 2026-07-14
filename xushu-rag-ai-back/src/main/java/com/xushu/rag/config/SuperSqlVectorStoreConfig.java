@@ -23,8 +23,7 @@ import java.util.List;
 
 /**
  * SuperSQL 专用向量库配置
- * <p>单独创建 super_sql_store collection（无 sparse_vector），
- * 与主 RAG collection vector_store_v2 隔离，避免 BM25 字段冲突。</p>
+ * <p>单独创建 super_sql_store collection（无 sparse_vector），与主 RAG collection 隔离。</p>
  *
  * @author Joseph
  */
@@ -49,8 +48,9 @@ public class SuperSqlVectorStoreConfig {
         initSuperSqlCollection(v2Client);
         VectorStore store = MilvusVectorStore.builder(milvusClient, embeddingModel)
                 .collectionName(SUPER_SQL_COLLECTION)
+                .embeddingDimension(embeddingDimension)
                 .build();
-        log.info("[SuperSQL] SpringVectorStore 已绑定专用 collection: {}", SUPER_SQL_COLLECTION);
+        log.info("[SuperSQL] SpringVectorStore 已绑定专用 collection: {} (dim={})", SUPER_SQL_COLLECTION, embeddingDimension);
         return new SpringVectorStore(store);
     }
 
@@ -60,7 +60,6 @@ public class SuperSqlVectorStoreConfig {
                     .collectionName(SUPER_SQL_COLLECTION).build());
             if (exists) {
                 if (initTrain) {
-                    // init-train=true 时删除旧 collection，避免表结构变更后旧向量污染
                     v2Client.dropCollection(DropCollectionReq.builder()
                             .collectionName(SUPER_SQL_COLLECTION).build());
                     log.info("[SuperSQL] 旧 collection {} 已删除，即将重建（init-train=true）", SUPER_SQL_COLLECTION);
@@ -100,7 +99,7 @@ public class SuperSqlVectorStoreConfig {
             v2Client.loadCollection(LoadCollectionReq.builder()
                     .collectionName(SUPER_SQL_COLLECTION).build());
 
-            log.info("[SuperSQL] collection {} 创建成功", SUPER_SQL_COLLECTION);
+            log.info("[SuperSQL] collection {} 创建成功 (dim={})", SUPER_SQL_COLLECTION, embeddingDimension);
         } catch (Exception e) {
             log.error("[SuperSQL] collection 初始化失败: {}", e.getMessage(), e);
             throw new RuntimeException("SuperSQL collection 初始化失败", e);

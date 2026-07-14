@@ -6,6 +6,7 @@ import com.xushu.rag.common.JwtTokenUserInterceptor;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.transformer.splitter.TokenTextSplitter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
@@ -37,8 +38,10 @@ public class ApplicationConfig implements WebMvcConfigurer {
     }
 
     @Bean
-    ChatClient chatclient(ChatClient.Builder builder){
-        return builder.defaultSystem("你是一个乐于助人解决问题的AI机器人")
+    ChatClient chatclient(ChatModel chatModel){
+        // 注入的 ChatModel 会随 xushu.ai.provider 切换（DashScope / Ollama @Primary）
+        return ChatClient.builder(chatModel)
+                .defaultSystem("你是一个乐于助人解决问题的AI机器人")
                 .build();
     }
 
