@@ -86,6 +86,12 @@ public final class StateKeys {
     /** CoT 推理过程文本（RetrievalAnswerStrategy/PlanningAnswerStrategy 产出，供 SSE 推送"深度思考"） */
     public static final String COT_ANALYSIS = "cotAnalysis";
 
+    /** 检索来源文档列表 JSON（LLMGenerateNode 写入，供持久化记录 AI 答案来源） */
+    public static final String RETRIEVAL_SOURCES = "retrievalSources";
+
+    /** LLM 生成耗时毫秒（LLMGenerateNode 写入，供持久化记录性能） */
+    public static final String DURATION_MS = "durationMs";
+
     /** 答案形态：single_value | list | boolean | description | comparison（IntentClassifyNode写入，LLMGenerateNode读取） */
     public static final String ANSWER_TYPE = "answerType";
 

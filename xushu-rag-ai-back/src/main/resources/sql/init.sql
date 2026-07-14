@@ -285,3 +285,72 @@ CREATE TABLE `mcp_call_log` (
 -- 初始密钥数据（开发测试用）
 INSERT INTO `mcp_secret_key` (`secret_key`, `name`, `status`) VALUES
 ('ziniu-mcp-dev-key-2026', '开发测试密钥', 'ACTIVE');
+
+
+-- ==================== 对话持久化表 ====================
+
+-- Table: conversation（对话会话表）
+DROP TABLE IF EXISTS `conversation`;
+CREATE TABLE `conversation` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `conversation_id` VARCHAR(64) NOT NULL COMMENT '会话唯一标识(userId_sessionId 或 UUID)',
+  `user_id` BIGINT NOT NULL COMMENT '用户ID',
+  `title` VARCHAR(255) DEFAULT NULL COMMENT '会话标题(首条消息截断50字)',
+  `kb_ids` VARCHAR(255) DEFAULT NULL COMMENT '关联知识库ID列表(逗号分隔)',
+  `status` VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' COMMENT '状态: ACTIVE/ESCALATED/HUMAN_SERVING/ARCHIVED',
+  `escalate_reason` VARCHAR(50) DEFAULT NULL COMMENT '转人工原因: emotion_negative/manual/auto_high_risk',
+  `human_agent_id` BIGINT DEFAULT NULL COMMENT '接入的客服坐席ID(预留)',
+  `message_count` INT NOT NULL DEFAULT 0 COMMENT '消息总数(冗余,加速列表展示)',
+  `first_message` VARCHAR(200) DEFAULT NULL COMMENT '首条消息摘要(列表展示)',
+  `last_message` VARCHAR(200) DEFAULT NULL COMMENT '末条消息摘要(列表展示)',
+  `token_total` INT DEFAULT 0 COMMENT '累计token消耗(成本分析)',
+  `create_time` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
+  `update_time` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '最后活跃时间',
+  `metadata` JSON DEFAULT NULL COMMENT '扩展元数据(浏览器/IP/渠道等)',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_conversation_id` (`conversation_id`),
+  KEY `idx_user_id_status` (`user_id`, `status`),
+  KEY `idx_status_update` (`status`, `update_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对话会话表';
+
+-- Table: chat_message（对话消息表）
+DROP TABLE IF EXISTS `chat_message`;
+CREATE TABLE `chat_message` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `message_id` VARCHAR(64) NOT NULL COMMENT '消息唯一标识(UUID)',
+  `conversation_id` VARCHAR(64) NOT NULL COMMENT '所属会话ID',
+  `user_id` BIGINT NOT NULL COMMENT '用户ID(冗余,加速查询)',
+  `role` VARCHAR(20) NOT NULL COMMENT '角色: USER/ASSISTANT/SYSTEM/TOOL/HUMAN_AGENT',
+  `content` MEDIUMTEXT NOT NULL COMMENT '消息内容(支持Markdown/长文本)',
+  `content_type` VARCHAR(20) NOT NULL DEFAULT 'TEXT' COMMENT '内容类型: TEXT/MARKDOWN/IMAGE/TOOL_CALL/STEP',
+  `category` VARCHAR(30) DEFAULT NULL COMMENT '意图分类(仅ASSISTANT): calculation/reference/planning/chitchat等',
+  `cot_content` TEXT DEFAULT NULL COMMENT 'CoT思考过程(仅ASSISTANT,深度思考展示)',
+  `tool_name` VARCHAR(100) DEFAULT NULL COMMENT '工具名称(仅TOOL角色)',
+  `tool_call_id` VARCHAR(64) DEFAULT NULL COMMENT '关联mcp_call_log的调用ID(仅TOOL角色)',
+  `retrieval_sources` JSON DEFAULT NULL COMMENT '检索来源文档列表(仅ASSISTANT,含docId/page/score)',
+  `tokens_input` INT DEFAULT NULL COMMENT '输入token数(仅ASSISTANT)',
+  `tokens_output` INT DEFAULT NULL COMMENT '输出token数(仅ASSISTANT)',
+  `duration_ms` BIGINT DEFAULT NULL COMMENT '生成耗时毫秒(仅ASSISTANT)',
+  `is_escalated` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否触发转人工(0/1)',
+  `create_time` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_message_id` (`message_id`),
+  KEY `idx_conversation_time` (`conversation_id`, `create_time`),
+  KEY `idx_user_id_time` (`user_id`, `create_time`),
+  KEY `idx_role_conversation` (`role`, `conversation_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对话消息表';
+
+-- Table: conversation_event（会话事件审计表）
+DROP TABLE IF EXISTS `conversation_event`;
+CREATE TABLE `conversation_event` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `conversation_id` VARCHAR(64) NOT NULL COMMENT '所属会话ID',
+  `event_type` VARCHAR(30) NOT NULL COMMENT '事件类型: CREATED/AI_RESPONDED/ESCALATED/HUMAN_JOINED/HUMAN_REPLIED/BACK_TO_AI/ARCHIVED',
+  `event_data` JSON DEFAULT NULL COMMENT '事件详情JSON',
+  `operator_id` BIGINT DEFAULT NULL COMMENT '操作者ID(用户或坐席)',
+  `operator_type` VARCHAR(20) DEFAULT NULL COMMENT '操作者类型: USER/HUMAN_AGENT/SYSTEM',
+  `create_time` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '事件时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_conversation_time` (`conversation_id`, `create_time`),
+  KEY `idx_event_type_time` (`event_type`, `create_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话事件审计表';

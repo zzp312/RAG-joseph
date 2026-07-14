@@ -93,4 +93,19 @@ public final class SseFormatter {
                 .data(json.toJSONString())
                 .build();
     }
+
+    /**
+     * 生成 conversation 事件，携带 conversationId 给前端
+     * <p>前端收到后设置 currentConversationId，使侧边栏能同步当前会话。
+     * 仅在会话懒创建后首次发送，不影响后续 message/step/thinking 事件。</p>
+     *
+     * @param conversationId 会话 ID
+     * @return SSE 事件
+     */
+    public static ServerSentEvent<String> conversation(String conversationId) {
+        return ServerSentEvent.<String>builder()
+                .event("conversation")
+                .data(conversationId == null ? "" : conversationId)
+                .build();
+    }
 }

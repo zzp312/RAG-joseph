@@ -103,8 +103,7 @@ public class ToolCallNode {
             if (json == null) {
                 // 无工具调用 → 任务完成
                 log.info("[ToolCallNode] 第{}轮LLM未输出工具调用", round);
-                String answer = calledTools.isEmpty() ? llmResponse
-                        : forceFinalAnswer(systemPrompt, toolCtx.toString(), question);
+                String answer = finalizeAnswer(llmResponse, toolCtx, calledTools, systemPrompt, question);
                 return Map.of(
                         StateKeys.MCP_RESULT, toolCtx.toString(),
                         StateKeys.ANSWER, answer,
@@ -118,7 +117,8 @@ public class ToolCallNode {
                 log.warn("[ToolCallNode] JSON解析失败: {}", jsonEx.getMessage());
                 return calledTools.isEmpty() ? Map.of(StateKeys.ANSWER, llmResponse)
                         : Map.of(StateKeys.MCP_RESULT, toolCtx.toString(),
-                                StateKeys.ANSWER, forceFinalAnswer(systemPrompt, toolCtx.toString(), question),
+                                StateKeys.ANSWER, LLMGenerateNode.stripJsonWrapper(
+                                        forceFinalAnswer(systemPrompt, toolCtx.toString(), question)),
                                 StateKeys.STEPS, buildToolSteps(calledTools));
             }
 
@@ -127,8 +127,14 @@ public class ToolCallNode {
             Map<String, Object> arguments = call.getObject("arguments", Map.class);
 
             if (serverName == null || toolName == null) {
-                log.warn("[ToolCallNode] JSON缺字段: {}", json);
-                continue;
+                // 裁判(LLM)判定任务已完成，但未返回合法工具调用 JSON（通常受全局 JSON 格式影响，
+                // 把"完成"包装成了 {stepByStepAnalysis,...,finalAnswer}）。直接收口为终态答案，
+                // 不再空转重试，避免多轮无效调用与原始 JSON 泄漏。
+                log.warn("[ToolCallNode] 非工具调用JSON（缺server_name/tool_name），按终态答案收口");
+                return Map.of(
+                        StateKeys.MCP_RESULT, toolCtx.toString(),
+                        StateKeys.ANSWER, finalizeAnswer(llmResponse, toolCtx, calledTools, systemPrompt, question),
+                        StateKeys.STEPS, buildToolSteps(calledTools));
             }
 
             // 4. 执行工具（内部 or 外部 MCP）
@@ -157,13 +163,15 @@ public class ToolCallNode {
                 log.warn("[ToolCallNode] 上下文超长({}字)，强制LLM输出", toolCtx.length());
                 return Map.of(
                         StateKeys.MCP_RESULT, toolCtx.toString(),
-                        StateKeys.ANSWER, forceFinalAnswer(systemPrompt, toolCtx.toString(), question),
+                        StateKeys.ANSWER, LLMGenerateNode.stripJsonWrapper(
+                                forceFinalAnswer(systemPrompt, toolCtx.toString(), question)),
                         StateKeys.STEPS, buildToolSteps(calledTools));
             }
         }
 
         // 超轮次强制输出
-        String forcedAnswer = forceFinalAnswer(systemPrompt, toolCtx.toString(), question);
+        String forcedAnswer = LLMGenerateNode.stripJsonWrapper(
+                forceFinalAnswer(systemPrompt, toolCtx.toString(), question));
         return Map.of(
                 StateKeys.MCP_RESULT, toolCtx.toString(),
                 StateKeys.ANSWER, forcedAnswer,
@@ -349,6 +357,24 @@ public class ToolCallNode {
             log.error("[ToolCallNode] forceFinalAnswer异常: {}", e.getMessage());
             return "工具执行完成，但整理结果时出现错误。";
         }
+    }
+
+    /**
+     * 终态答案收口：裁判(LLM)判定"任务完成"时可能返回 {stepByStepAnalysis,...,finalAnswer} 这类 JSON
+     * （受全局 JSON 输出格式影响），此处反 JSON 包装提取 finalAnswer 作为纯文本；
+     * 若无可提取的 finalAnswer 则退回强制自然语言整理，确保 StateKeys.ANSWER 永远是纯文本，
+     * 用户不会看到原始 JSON。
+     */
+    private String finalizeAnswer(String llmResponse, StringBuilder toolCtx,
+                                  List<String> calledTools, String systemPrompt, String question) {
+        String unwrapped = LLMGenerateNode.stripJsonWrapper(llmResponse);
+        if (unwrapped != null && !unwrapped.trim().equals(llmResponse.trim()) && !unwrapped.isBlank()) {
+            return unwrapped;
+        }
+        // 无 finalAnswer 包装：有工具调用则强制整理一次，否则直接用原文
+        String answer = calledTools.isEmpty() ? llmResponse
+                : forceFinalAnswer(systemPrompt, toolCtx.toString(), question);
+        return LLMGenerateNode.stripJsonWrapper(answer);
     }
 
     private record ToolCallResult(String toolName, String result, boolean isError) {

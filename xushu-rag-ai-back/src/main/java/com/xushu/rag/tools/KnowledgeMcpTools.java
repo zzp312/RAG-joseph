@@ -25,15 +25,23 @@ import com.xushu.rag.graph.StateKeys;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.multipart.MultipartFile;
 
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetAddress;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
@@ -94,7 +102,14 @@ public class KnowledgeMcpTools {
     @Qualifier("mcpUploadExecutor")
     private ThreadPoolExecutor mcpUploadExecutor;
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    private final RestTemplate restTemplate = createSecureRestTemplate();
+
+    private static RestTemplate createSecureRestTemplate() {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(10_000);
+        factory.setReadTimeout(60_000);
+        return new RestTemplate(factory);
+    }
 
     /**
      * 列出所有 ACTIVE 状态的知识库（支持分页）
@@ -121,22 +136,17 @@ public class KnowledgeMcpTools {
         int targetPage = (page == null || page < 1) ? DEFAULT_PAGE : page;
         int targetPageSize = (pageSize == null || pageSize < 1) ? DEFAULT_PAGE_SIZE : pageSize;
 
-        List<KnowledgeBase> allActive = knowledgeBaseMapper.selectActiveKnowledgeBases();
-        int total = allActive.size();
+        int offset = (targetPage - 1) * targetPageSize;
+        List<Map<String, Object>> rows = knowledgeBaseMapper.selectActiveWithDocCountPaged(offset, targetPageSize);
+        int total = knowledgeBaseMapper.countActive();
 
-        int fromIndex = (targetPage - 1) * targetPageSize;
-        int toIndex = Math.min(fromIndex + targetPageSize, total);
-        List<KnowledgeBase> paged = fromIndex >= total
-                ? new ArrayList<>()
-                : allActive.subList(fromIndex, toIndex);
-
-        List<Map<String, Object>> kbs = paged.stream().map(kb -> {
+        List<Map<String, Object>> kbs = rows.stream().map(row -> {
             Map<String, Object> item = new HashMap<>();
-            item.put("kbId", kb.getId());
-            item.put("kbName", kb.getName());
-            item.put("docCount", documentMapper.countByKbId(kb.getId()));
-            item.put("description", kb.getDescription());
-            item.put("createTime", kb.getCreateTime());
+            item.put("kbId", row.get("id"));
+            item.put("kbName", row.get("name"));
+            item.put("docCount", row.get("doc_count"));
+            item.put("description", row.get("description"));
+            item.put("createTime", row.get("create_time"));
             return item;
         }).collect(Collectors.toList());
 
@@ -486,17 +496,89 @@ public class KnowledgeMcpTools {
     }
 
     /**
-     * 从 URL 下载文件内容
+     * 从 URL 下载文件内容（含 SSRF 防护 + OOM 防护）
+     * <p>1. 校验 URL 不指向内网/回环地址（防 SSRF）
+     * <p>2. HEAD 预检 Content-Length（提前拒绝超大文件）
+     * <p>3. 流式下载 + 运行时字节计数（防止无 Content-Length 时 OOM）
      */
     private byte[] downloadFromUrl(String fileUrl) {
         if (fileUrl == null || (!fileUrl.startsWith("http://") && !fileUrl.startsWith("https://"))) {
             throw new IllegalArgumentException("file_url must start with http:// or https://");
         }
-        byte[] bytes = restTemplate.getForObject(fileUrl, byte[].class);
-        if (bytes == null) {
+        validateUrlNotInternal(fileUrl);
+
+        // HEAD 预检：提前拒绝超大文件（部分服务器可能不支持 HEAD，降级走流式限流）
+        try {
+            HttpHeaders headers = restTemplate.headForHeaders(fileUrl);
+            long contentLength = headers.getContentLength();
+            if (contentLength > MAX_URL_SIZE) {
+                throw new IllegalArgumentException("file exceeds 100MB limit (Content-Length: " + contentLength + ")");
+            }
+        } catch (org.springframework.web.client.HttpClientErrorException e) {
+            // 405 Method Not Allowed 等：服务器不支持 HEAD，降级走 GET 流式限流
+            log.debug("[downloadFromUrl] HEAD not supported, falling back to streaming GET: {}", e.getStatusCode());
+        }
+
+        // 流式下载 + 运行时字节计数
+        byte[] bytes = restTemplate.execute(fileUrl, HttpMethod.GET, null, response -> {
+            long declaredLen = response.getHeaders().getContentLength();
+            if (declaredLen > MAX_URL_SIZE) {
+                throw new IllegalArgumentException("file exceeds 100MB limit");
+            }
+            int initialSize = declaredLen > 0 && declaredLen <= MAX_URL_SIZE ? (int) declaredLen : 8192;
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream(initialSize);
+            byte[] chunk = new byte[8192];
+            int read;
+            long total = 0;
+            try (InputStream is = response.getBody()) {
+                while ((read = is.read(chunk)) != -1) {
+                    total += read;
+                    if (total > MAX_URL_SIZE) {
+                        throw new IllegalArgumentException("file exceeds 100MB limit during streaming download");
+                    }
+                    buffer.write(chunk, 0, read);
+                }
+            }
+            if (buffer.size() == 0) {
+                throw new RuntimeException("downloaded empty content from file_url");
+            }
+            return buffer.toByteArray();
+        });
+
+        if (bytes == null || bytes.length == 0) {
             throw new RuntimeException("downloaded empty content from file_url");
         }
         return bytes;
+    }
+
+    /**
+     * SSRF 防护：校验 URL 不指向内网/回环/链路本地地址
+     * <p>拦截 127.0.0.0/8、0.0.0.0/8、169.254.0.0/16（含云元数据 169.254.169.254）、
+     * 10.0.0.0/8、172.16.0.0/12、192.168.0.0/16、IPv6 ::1 / fe80:: / fc00:: 等内网段。
+     */
+    private void validateUrlNotInternal(String fileUrl) {
+        try {
+            URI uri = new URI(fileUrl);
+            String host = uri.getHost();
+            if (host == null || host.isEmpty()) {
+                throw new IllegalArgumentException("invalid file_url: missing host");
+            }
+            InetAddress[] addresses = InetAddress.getAllByName(host);
+            for (InetAddress addr : addresses) {
+                if (addr.isLoopbackAddress()
+                        || addr.isAnyLocalAddress()
+                        || addr.isLinkLocalAddress()
+                        || addr.isSiteLocalAddress()
+                        || addr.isMulticastAddress()) {
+                    throw new IllegalArgumentException(
+                            "file_url points to a forbidden internal address: " + addr.getHostAddress());
+                }
+            }
+        } catch (URISyntaxException e) {
+            throw new IllegalArgumentException("invalid file_url: " + e.getMessage());
+        } catch (UnknownHostException e) {
+            throw new IllegalArgumentException("cannot resolve file_url host: " + e.getMessage());
+        }
     }
 
     /**

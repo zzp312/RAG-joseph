@@ -5,6 +5,8 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import com.xushu.rag.common.ApplicationConstant;
 import com.xushu.rag.context.BaseContext;
+import com.xushu.rag.conversation.ChatMemoryRestoreService;
+import com.xushu.rag.conversation.ConversationPersistenceService;
 import com.xushu.rag.graph.RagGraphAgent;
 import com.xushu.rag.graph.SseFormatter;
 import com.xushu.rag.graph.StateKeys;
@@ -12,6 +14,7 @@ import com.xushu.rag.graph.nodes.HybridSearchTestNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
@@ -41,6 +44,12 @@ public class GraphChatController {
     private final RedisTemplate<String, String> redisTemplate;
     private final ChatMemory chatMemory;
     private final HybridSearchTestNode hybridSearchTestNode;
+    private final ConversationPersistenceService persistenceService;
+    private final ChatMemoryRestoreService memoryRestoreService;
+
+    /** 对话持久化开关（默认开启） */
+    @Value("${conversation.persistence.enabled:true}")
+    private boolean persistenceEnabled;
 
     /** Redis key前缀：用户检索指纹 */
     private static final String FINGERPRINT_KEY_PREFIX = "rag:kb_fingerprint:";
@@ -66,11 +75,12 @@ public class GraphChatController {
     /**
      * Graph Agent RAG问答（SSE流式）
      *
-     * @param message   用户提问
-     * @param kbIds     选中的知识库ID列表（可选）
-     * @param sources   选中的文件列表（可选）
-     * @param sessionId 会话标识（多标签页隔离）
-     * @param escalate  是否转人工（用户点击转人工按钮时传true）
+     * @param message        用户提问
+     * @param kbIds          选中的知识库ID列表（可选）
+     * @param sources        选中的文件列表（可选）
+     * @param sessionId      会话标识（多标签页隔离，兼容旧前端）
+     * @param conversationId 会话唯一标识（新前端显式传，支持多会话切换）
+     * @param escalate       是否转人工（用户点击转人工按钮时传true）
      * @return SSE流
      */
     @PostMapping(value = "/rag-graph", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -79,12 +89,34 @@ public class GraphChatController {
             @RequestParam(value = "kbIds", required = false) List<Long> kbIds,
             @RequestParam(value = "sources", required = false) List<String> sources,
             @RequestParam(value = "sessionId", required = false, defaultValue = "default") String sessionId,
+            @RequestParam(value = "conversationId", required = false) String conversationId,
             @RequestParam(value = "escalate", required = false, defaultValue = "false") Boolean escalate) {
 
         Long userId = BaseContext.getCurrentId();
-        String conversationId = userId + "_" + sessionId;
-        String modeKey = MODE_KEY_PREFIX + conversationId;
-        String wasHumanKey = WAS_HUMAN_KEY_PREFIX + conversationId;
+        // conversationId 优先级：显式传 > 默认拼接（兼容旧前端）
+        final String convId;
+        if (conversationId == null || conversationId.isEmpty()) {
+            convId = userId + "_" + sessionId;
+        } else {
+            convId = conversationId;
+        }
+        String modeKey = MODE_KEY_PREFIX + convId;
+        String wasHumanKey = WAS_HUMAN_KEY_PREFIX + convId;
+
+        // ========== 对话持久化：懒创建会话 + 回填 ChatMemory + 写入用户消息 ==========
+        String kbIdsStr = kbIds != null ? kbIds.toString().replaceAll("[\\[\\] ]", "") : null;
+        if (persistenceEnabled) {
+            try {
+                persistenceService.createConversationIfAbsent(convId, userId, kbIdsStr);
+                // 回填 ChatMemory（切换历史会话时从 MySQL 恢复最近 10 条）
+                memoryRestoreService.restoreMemoryIfNeeded(convId);
+                // 同步写入用户消息
+                persistenceService.saveUserMessage(convId, userId, message);
+            } catch (Exception e) {
+                log.warn("[持久化] 会话初始化失败，不影响主流程, conversationId={}, err={}",
+                        convId, e.getMessage());
+            }
+        }
 
         // ========== 前置拦截：人工转接 ==========
 
@@ -92,7 +124,16 @@ public class GraphChatController {
         if (Boolean.TRUE.equals(escalate)) {
             redisTemplate.opsForValue().set(modeKey, "HUMAN", HUMAN_MODE_TTL_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
             redisTemplate.opsForValue().set(wasHumanKey, "1", HUMAN_MODE_TTL_SECONDS + 60, java.util.concurrent.TimeUnit.SECONDS);
-            log.info("[人工转接] 用户主动转人工, conversationId={}", conversationId);
+            log.info("[人工转接] 用户主动转人工, conversationId={}", convId);
+            if (persistenceEnabled) {
+                try {
+                    persistenceService.updateConversationStatus(convId, "ESCALATED", "manual");
+                    persistenceService.saveSystemMessage(convId, userId, "人工客服已接入", "human_start");
+                    persistenceService.saveEvent(convId, "ESCALATED", "{\"reason\":\"manual\"}", userId, "USER");
+                } catch (Exception e) {
+                    log.warn("[持久化] 转人工事件写入失败, conversationId={}, err={}", convId, e.getMessage());
+                }
+            }
             return Flux.just(
                     SseFormatter.divider("human_start", "人工客服已接入"),
                     SseFormatter.done()
@@ -104,7 +145,7 @@ public class GraphChatController {
         if ("HUMAN".equals(currentMode)) {
             redisTemplate.expire(modeKey, HUMAN_MODE_TTL_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
             log.info("[人工服务中] userId={}, message='{}', conversationId={}, TTL刷新",
-                    userId, message.length() > 50 ? message.substring(0, 50) + "..." : message, conversationId);
+                    userId, message.length() > 50 ? message.substring(0, 50) + "..." : message, convId);
             return Flux.just(SseFormatter.message("HUMAN_MODE"), SseFormatter.done());
         }
 
@@ -116,11 +157,11 @@ public class GraphChatController {
         // 检索范围变化检测 → 清除旧记忆
         String currentFingerprint = (kbIds != null ? kbIds.toString() : "all")
                 + "|" + (sources != null ? sources.toString() : "all");
-        String fingerprintKey = FINGERPRINT_KEY_PREFIX + conversationId;
+        String fingerprintKey = FINGERPRINT_KEY_PREFIX + convId;
         String previousFingerprint = redisTemplate.opsForValue().getAndSet(fingerprintKey, currentFingerprint);
         if (previousFingerprint != null && !previousFingerprint.equals(currentFingerprint)) {
-            chatMemory.clear(conversationId);
-            log.info("[记忆清除] conversationId={}, {} → {}", conversationId, previousFingerprint, currentFingerprint);
+            chatMemory.clear(convId);
+            log.info("[记忆清除] conversationId={}, {} → {}", convId, previousFingerprint, currentFingerprint);
         }
 
         // 构建初始 State
@@ -131,7 +172,7 @@ public class GraphChatController {
         initialState.put(StateKeys.KB_IDS, kbIds);
         initialState.put(StateKeys.SOURCES, sources);
         initialState.put(StateKeys.EFFECTIVE_KB_ID, effectiveKbId);
-        initialState.put(StateKeys.CONVERSATION_ID, conversationId);
+        initialState.put(StateKeys.CONVERSATION_ID, convId);
         initialState.put(StateKeys.DOCUMENTS, Collections.emptyList());
         initialState.put(StateKeys.CONTEXT, "");
         initialState.put(StateKeys.ANSWER, "");
@@ -148,18 +189,30 @@ public class GraphChatController {
 
         long requestStart = System.currentTimeMillis();
         log.info("[GraphChat] 收到请求, conversationId={}, message={}, kbIds={}, sources={}",
-                conversationId,
+                convId,
                 message.length() > 50 ? message.substring(0, 50) + "..." : message,
                 kbIds, sources);
 
         // 异步执行 Graph
         CompletableFuture.runAsync(() -> {
             try {
+                // 发送 conversationId 给前端（用于侧边栏同步当前会话）
+                tryEmitOrLog(sink, SseFormatter.conversation(convId));
+
                 // 场景3：回AI → 先发送分界线
                 if (returningFromHuman) {
                     tryEmitOrLog(sink, SseFormatter.divider("human_end", "AI已恢复服务"));
                     redisTemplate.delete(wasHumanKey);
-                    log.info("[人工结束] 超时回AI, conversationId={}", conversationId);
+                    log.info("[人工结束] 超时回AI, conversationId={}", convId);
+                    if (persistenceEnabled) {
+                        try {
+                            persistenceService.updateConversationStatus(convId, "ACTIVE", null);
+                            persistenceService.saveSystemMessage(convId, userId, "AI已恢复服务", "human_end");
+                            persistenceService.saveEvent(convId, "BACK_TO_AI", null, userId, "SYSTEM");
+                        } catch (Exception ex) {
+                            log.warn("[持久化] 回AI事件写入失败, conversationId={}, err={}", convId, ex.getMessage());
+                        }
+                    }
                 }
 
                 // 编译Graph（带回调）
@@ -181,24 +234,44 @@ public class GraphChatController {
                         if ("escalation".equals(nodeName)) {
                             redisTemplate.opsForValue().set(modeKey, "HUMAN", HUMAN_MODE_TTL_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
                             redisTemplate.opsForValue().set(wasHumanKey, "1", HUMAN_MODE_TTL_SECONDS + 60, java.util.concurrent.TimeUnit.SECONDS);
-                            log.info("[人工转接] 情绪触发转人工, conversationId={}", conversationId);
+                            log.info("[人工转接] 情绪触发转人工, conversationId={}", convId);
                             tryEmitOrLog(sink, SseFormatter.divider("human_start", "人工客服已接入"));
                             if (steps != null && !steps.isEmpty()) {
                                 tryEmitOrLog(sink, SseFormatter.step(StateKeys.StepType.THINKING, steps, nodeTs));
                             }
                             // 发送固定文案，让前端气泡有内容
                             tryEmitOrLog(sink, SseFormatter.message("已为您转接人工客服服务~"));
+                            if (persistenceEnabled) {
+                                try {
+                                    persistenceService.updateConversationStatus(convId, "ESCALATED", "emotion_negative");
+                                    persistenceService.saveSystemMessage(convId, userId, "人工客服已接入", "human_start");
+                                    persistenceService.saveEvent(convId, "ESCALATED", "{\"reason\":\"emotion_negative\"}", userId, "SYSTEM");
+                                } catch (Exception ex) {
+                                    log.warn("[持久化] 转人工事件写入失败, conversationId={}, err={}", convId, ex.getMessage());
+                                }
+                            }
                             return;
                         }
 
                         // 工具调用（本地 + 外部 MCP） → 发送结果是TOOL步骤
-                        if ("tool_call".equals(nodeName) || "mcp_tool_call".equals(nodeName) || "local_tool_call".equals(nodeName)) {
+                        if ("tool_call".equals(nodeName)) {
                             if (steps != null && !steps.isEmpty()) {
                                 tryEmitOrLog(sink, SseFormatter.step(StateKeys.StepType.TOOL, steps, nodeTs));
                             }
                             String answer = (String) callbackData.getOrDefault(StateKeys.ANSWER, "");
                             if (!answer.isEmpty()) {
                                 tryEmitOrLog(sink, SseFormatter.message(answer));
+                            }
+                            // 异步持久化工具调用
+                            if (persistenceEnabled) {
+                                try {
+                                    String toolName = (String) callbackData.getOrDefault("toolName", nodeName);
+                                    String toolCallId = (String) callbackData.getOrDefault("toolCallId", "");
+                                    String cot = (String) callbackData.getOrDefault(StateKeys.COT_ANALYSIS, "");
+                                    persistenceService.saveToolMessage(convId, userId, toolName, answer, toolCallId, cot);
+                                } catch (Exception ex) {
+                                    log.warn("[持久化] 工具消息写入失败, conversationId={}, err={}", convId, ex.getMessage());
+                                }
                             }
                             return;
                         }
@@ -212,6 +285,21 @@ public class GraphChatController {
                             String answer = (String) callbackData.getOrDefault(StateKeys.ANSWER, "");
                             if (!answer.isEmpty()) {
                                 tryEmitOrLog(sink, SseFormatter.message(answer));
+                            }
+                            // 异步持久化 AI 答案（含 CoT、检索来源、耗时）
+                            if (persistenceEnabled && !answer.isEmpty()) {
+                                try {
+                                    String category = (String) callbackData.getOrDefault(StateKeys.CATEGORY, "");
+                                    String retrievalSources = (String) callbackData.getOrDefault(StateKeys.RETRIEVAL_SOURCES, "[]");
+                                    Long durationMs = (Long) callbackData.getOrDefault(StateKeys.DURATION_MS, 0L);
+                                    persistenceService.saveAssistantMessage(convId, userId, answer,
+                                            cotAnalysis, category, retrievalSources, null, null, durationMs);
+                                    persistenceService.saveEvent(convId, "AI_RESPONDED",
+                                            "{\"category\":\"" + category + "\",\"duration\":" + durationMs + "}",
+                                            userId, "SYSTEM");
+                                } catch (Exception ex) {
+                                    log.warn("[持久化] AI消息写入失败, conversationId={}, err={}", convId, ex.getMessage());
+                                }
                             }
                             return;
                         }
@@ -240,21 +328,21 @@ public class GraphChatController {
                 long elapsed = System.currentTimeMillis() - requestStart;
                 if (cancelled.get()) {
                     log.warn("[GraphChat] Graph 执行结束（客户端已断开）, conversationId={}, 耗时={}ms",
-                            conversationId, elapsed);
+                            convId, elapsed);
                 } else {
                     log.info("[GraphChat] Graph 执行结束, conversationId={}, 耗时={}ms",
-                            conversationId, elapsed);
+                            convId, elapsed);
                     sink.tryEmitNext(SseFormatter.done());
                     sink.tryEmitComplete();
                 }
 
             } catch (Exception e) {
                 if (!cancelled.get()) {
-                    log.error("[GraphChat] 执行失败, conversationId={}", conversationId, e);
+                    log.error("[GraphChat] 执行失败, conversationId={}", convId, e);
                     sink.tryEmitError(e);
                 } else {
                     log.warn("[GraphChat] 执行异常（客户端已断开，忽略）, conversationId={}, err={}",
-                            conversationId, e.getMessage());
+                            convId, e.getMessage());
                 }
             }
         });
@@ -263,7 +351,7 @@ public class GraphChatController {
             long elapsed = System.currentTimeMillis() - requestStart;
             cancelled.set(true);
             log.warn("[SSE] 客户端断开连接，已设置取消标志, conversationId={}, 已耗时={}ms",
-                    conversationId, elapsed);
+                    convId, elapsed);
         });
     }
 

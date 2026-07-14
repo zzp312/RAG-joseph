@@ -55,10 +55,11 @@ export const getStreamChat = (
     sources?: string[],
     kbIds?: number[],
     sessionId?: string,
-    escalate?: boolean
+    escalate?: boolean,
+    conversationId?: string
 ) => {
     const ctrl = new AbortController();
-    
+
     const formData = new FormData();
     formData.append('message', message);
     if (sources && sources.length > 0) {
@@ -76,6 +77,9 @@ export const getStreamChat = (
     }
     if (escalate) {
         formData.append('escalate', 'true');
+    }
+    if (conversationId) {
+        formData.append('conversationId', conversationId);
     }
     
     fetchEventSource(service.defaults.baseURL + url, {

@@ -11,9 +11,11 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.PromptChatMemoryAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.document.Document;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
@@ -145,6 +147,7 @@ public class LLMGenerateNode {
                 finalSystem.length(), context.length(), augmentedUser.length());
 
         try {
+            long startTime = System.currentTimeMillis();
             String rawOutput = chatClient.prompt()
                     .system(finalSystem)
                     .user(augmentedUser)
@@ -153,6 +156,7 @@ public class LLMGenerateNode {
                             .param("chat_memory_response_size", CHAT_MEMORY_RESPONSE_SIZE))
                     .call()
                     .content();
+            long durationMs = System.currentTimeMillis() - startTime;
 
             if (rawOutput == null || rawOutput.trim().isEmpty()) {
                 return Map.of(
@@ -196,17 +200,23 @@ public class LLMGenerateNode {
             // 提取 CoT 推理过程，供 SSE 推送前端"深度思考"展示
             String cotAnalysis = strategy.extractThinking(rawOutput);
 
-            log.info("[LLMGenerate] 生成完成, answer={}字, cot={}字, question={}", answer.length(),
-                    cotAnalysis != null ? cotAnalysis.length() : 0,
+            log.info("[LLMGenerate] 生成完成, answer={}字, cot={}字, duration={}ms, question={}", answer.length(),
+                    cotAnalysis != null ? cotAnalysis.length() : 0, durationMs,
                     question.length() > 40 ? question.substring(0, 40) + "..." : question);
 
             // 异步评估已关闭
             // if (ragasEvalEnabled) { asyncEval(question, answer, context, chatClient); }
 
+            // 提取检索来源文档列表（从 State DOCUMENTS 中）
+            Object documents = state.get(StateKeys.DOCUMENTS);
+            String retrievalSourcesJson = extractRetrievalSources(documents);
+
             return Map.of(
                     StateKeys.ANSWER, answer,
                     StateKeys.COT_ANALYSIS, cotAnalysis != null ? cotAnalysis : "",
-                    StateKeys.STEPS, "答案生成完成"
+                    StateKeys.STEPS, "答案生成完成",
+                    StateKeys.RETRIEVAL_SOURCES, retrievalSourcesJson,
+                    StateKeys.DURATION_MS, durationMs
             );
 
         } catch (Exception e) {
@@ -316,5 +326,39 @@ public class LLMGenerateNode {
         if (answer == null || answer.length() > 60) return false;
         return answer.contains("请问") || answer.contains("您想了解") || answer.contains("具体是")
                 || answer.contains("哪个方面") || answer.contains("能详细");
+    }
+
+    /**
+     * 提取检索来源文档列表 JSON，供持久化记录 AI 答案来源。
+     * <p>从 Spring AI Document 的 metadata 中提取 docId/page/score 等字段，
+     * 序列化为简单 JSON 数组字符串。</p>
+     */
+    @SuppressWarnings("unchecked")
+    private static String extractRetrievalSources(Object documents) {
+        if (documents == null) {
+            return "[]";
+        }
+        try {
+            List<org.springframework.ai.document.Document> docs = (List<Document>) documents;
+            if (docs.isEmpty()) {
+                return "[]";
+            }
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < docs.size(); i++) {
+                org.springframework.ai.document.Document d = docs.get(i);
+                if (i > 0) sb.append(",");
+                java.util.Map<String, Object> meta = d.getMetadata();
+                sb.append("{");
+                sb.append("\"docId\":\"").append(meta.getOrDefault("docId", "")).append("\",");
+                sb.append("\"page\":\"").append(meta.getOrDefault("page", "")).append("\",");
+                sb.append("\"score\":\"").append(meta.getOrDefault("score", "")).append("\"");
+                sb.append("}");
+            }
+            sb.append("]");
+            return sb.toString();
+        } catch (Exception e) {
+            log.warn("[extractRetrievalSources] 提取失败: {}", e.getMessage());
+            return "[]";
+        }
     }
 }

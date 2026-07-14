@@ -1,5 +1,34 @@
 <template>
-  <div class="chat-container">
+  <div class="chat-layout">
+    <!-- 会话列表侧边栏 -->
+    <el-aside class="conversation-sidebar" width="240px">
+      <div class="sidebar-header">
+        <span class="sidebar-title">历史会话</span>
+        <el-button type="primary" size="small" :icon="Plus" @click="startNewConversation"
+                   :title="'新会话'">新建</el-button>
+      </div>
+      <div class="conversation-list" v-loading="conversationStore.loadingList">
+        <div v-for="conv in conversationStore.conversationList"
+             :key="conv.conversationId"
+             :class="['conversation-item',
+                      conversationStore.currentConversationId === conv.conversationId ? 'active' : '']"
+             @click="switchConversation(conv.conversationId)">
+          <div class="conv-title">{{ conv.title || conv.firstMessage || '新会话' }}</div>
+          <div class="conv-meta">
+            <span>{{ conv.messageCount }} 条</span>
+            <span>{{ formatTime(conv.updateTime) }}</span>
+          </div>
+          <el-icon class="conv-delete" @click.stop="archiveConv(conv.conversationId)">
+            <Delete />
+          </el-icon>
+        </div>
+        <div v-if="!conversationStore.loadingList && conversationStore.conversationList.length === 0"
+             class="empty-tip">
+          暂无历史会话
+        </div>
+      </div>
+    </el-aside>
+
     <el-card class="box-card">
       <div class="chat-messages" ref="messageContainer">
         <div v-for="(message, index) in messages" :key="index">
@@ -57,8 +86,8 @@
               </div>
             </div>
 
-            <!-- CoT 深度思考折叠块（在步骤和答案之间） -->
-            <div v-if="message.role === 'assistant' && message.cotContent"
+            <!-- CoT 深度思考折叠块（在步骤和答案之间）：任意角色只要带 cotContent 都展示，保留 TOOL 样式 -->
+            <div v-if="message.cotContent"
                  class="cot-block">
               <div class="cot-header" @click="toggleCot(message)">
                 <span class="toggle-icon">{{ message.cotCollapsed ? '▸' : '▾' }}</span>
@@ -183,12 +212,15 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
 import { marked } from 'marked'
-import { Document, CircleCheckFilled } from '@element-plus/icons-vue'
+import { Document, CircleCheckFilled, Plus, Delete } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { ChatApi, type ChatMessage } from '@/api/ChatApi'
 import { getStreamChat } from '@/api/StreamApi'
 import { queryFileApi, listKnowledgeBasesApi, getLatestDocumentsBatchApi } from '@/api/KnowHubApi'
 import { useWorkflowSteps, type WorkflowStep } from '@/composables/useWorkflowSteps'
+import { useConversationStore } from '@/store/conversation'
+
+const conversationStore = useConversationStore()
 
 
 const messages = ref<ChatMessage[]>([])
@@ -290,6 +322,10 @@ const handleEscalate = () => {
   } as ChatMessage)
 
     getStreamChat('转人工', ChatApi.RagGraph, (event) => {
+      if (event.event === 'conversation' && event.data) {
+        conversationStore.setCurrentConversation(event.data)
+        return
+      }
       if (event.event === 'divider' && event.data) {
         try {
           const d = JSON.parse(event.data)
@@ -301,7 +337,8 @@ const handleEscalate = () => {
       isLoading.value = false
     }, () => {
       isLoading.value = false
-    }, undefined, undefined, sessionId.value, true)
+      conversationStore.loadConversationList()
+    }, undefined, undefined, sessionId.value, true, conversationStore.currentConversationId || undefined)
     scrollToBottom()
 }
 
@@ -321,6 +358,11 @@ const sendMessage = (ragUrl: string) => {
     getStreamChat(currentInput, ragUrl, (event: any) => {
       const eventName = event.event || ''
       const rawData = event.data || ''
+      // conversation 事件：后端懒创建后回传 conversationId
+      if (eventName === 'conversation') {
+        if (rawData) conversationStore.setCurrentConversation(rawData)
+        return
+      }
       // 回AI分界线
       if (eventName === 'divider') {
         try {
@@ -372,7 +414,8 @@ const sendMessage = (ragUrl: string) => {
         returnReactiveMessage.totalDurationMs = totalDurationMs.value
         returnReactiveMessage.stepsCollapsed = true
       }
-    }, undefined, undefined, sessionId.value)
+      conversationStore.loadConversationList()
+    }, undefined, undefined, sessionId.value, false, conversationStore.currentConversationId || undefined)
     isLoading.value = false
     scrollToBottom()
     return
@@ -397,6 +440,9 @@ const sendMessage = (ragUrl: string) => {
   const lastIndex = messages.value.length - 1
   const reactiveMessage = messages.value[lastIndex]
 
+  // 后端仍处于人工模式时会返回 HUMAN_MODE 占位信号，用此标记在收尾时移除空气泡
+  let humanModeInterrupted = false
+
   // source过滤用原始文件名（匹配Milvus metadata.source），非OSS存储名
   const fileSources = selectedFiles.value.map(id => {
     const file = knowledgeFiles.value.find(f => f.id === id)
@@ -407,6 +453,12 @@ const sendMessage = (ragUrl: string) => {
     // 后端已使用 ServerSentEvent 规范发送 event 与 data，按 event 名分发
     const eventName = event.event || ''
     const rawData = event.data || ''
+
+    // conversation 事件：后端懒创建后回传 conversationId，前端同步侧边栏
+    if (eventName === 'conversation') {
+      if (rawData) conversationStore.setCurrentConversation(rawData)
+      return
+    }
 
     if (eventName === 'done' || rawData === '[DONE]') {
       return
@@ -438,8 +490,10 @@ const sendMessage = (ragUrl: string) => {
     }
 
     if (eventName === 'message') {
-      // 人工模式占位消息，静默终止
+      // 后端仍在人工模式：以后端为准把前端切回人工模式，并标记稍后移除占位空气泡
       if (rawData === 'HUMAN_MODE') {
+        humanModeInterrupted = true
+        isHumanMode.value = true
         return
       }
       const text = rawData.replace(/\\n/g, '\n')
@@ -497,12 +551,21 @@ const sendMessage = (ragUrl: string) => {
     reactiveMessage.totalDurationMs = totalDurationMs.value
   }, () => {
     isLoading.value = false
-    reactiveMessage.isTyping = false
     endSession()
+    // 人工模式：后端不生成回复，移除占位空气泡，不展示耗时
+    if (humanModeInterrupted) {
+      const idx = messages.value.indexOf(reactiveMessage)
+      if (idx !== -1) messages.value.splice(idx, 1)
+      conversationStore.loadConversationList()
+      return
+    }
+    reactiveMessage.isTyping = false
     reactiveMessage.stepsCompleted = true
     reactiveMessage.totalDurationMs = totalDurationMs.value
     reactiveMessage.stepsCollapsed = true
-  }, fileSources, selectedKbIds.value, sessionId.value)
+    // 刷新侧边栏会话列表（新会话已由后端懒创建并写入 MySQL）
+    conversationStore.loadConversationList()
+  }, fileSources, selectedKbIds.value, sessionId.value, false, conversationStore.currentConversationId || undefined)
 };
 
 /** 切换单条消息的步骤折叠状态 */
@@ -607,17 +670,163 @@ onMounted(() => {
 
   loadKnowledgeFiles()
   loadKnowledgeBases()
+  // 加载历史会话列表
+  conversationStore.loadConversationList()
 })
+
+// ========== 会话切换（Coze 式体验） ==========
+
+/** 切换到历史会话 */
+async function switchConversation(conversationId: string) {
+  if (conversationStore.switching) return
+  if (conversationStore.currentConversationId === conversationId) return
+
+  const restoredMessages = await conversationStore.switchToConversation(conversationId)
+  // 退出人工模式：切换会话后回到正常 AI 模式，避免卡在人工分支导致提问不过 LLM
+  isHumanMode.value = false
+  // 清空当前消息，用历史消息替换
+  messages.value = restoredMessages.map(m => ({
+    role: m.role,
+    content: m.content,
+    cotContent: (m as any).cotContent,
+    cotCollapsed: true,
+    stepsCollapsed: true,
+    stepsCompleted: true,
+  } as ChatMessage))
+  scrollToBottom()
+  ElMessage.success('已切换到历史会话，AI 已恢复记忆')
+}
+
+/** 新建会话 */
+function startNewConversation() {
+  conversationStore.startNewConversation()
+  // 新建会话同样退出人工模式，回到正常 AI 模式
+  isHumanMode.value = false
+  messages.value = [{
+    role: 'assistant',
+    content: '你好！我是AI助手，请问有什么可以帮助你的吗？'
+  } as ChatMessage]
+  ElMessage.success('已创建新会话')
+}
+
+/** 归档会话 */
+async function archiveConv(conversationId: string) {
+  await conversationStore.archiveConversation(conversationId)
+  if (conversationStore.currentConversationId === null) {
+    messages.value = [{
+      role: 'assistant',
+      content: '你好！我是AI助手，请问有什么可以帮助你的吗？'
+    } as ChatMessage]
+  }
+}
+
+/** 格式化时间 */
+function formatTime(timeStr: string): string {
+  if (!timeStr) return ''
+  const d = new Date(timeStr)
+  const now = new Date()
+  if (d.toDateString() === now.toDateString()) {
+    return d.toTimeString().slice(0, 5)
+  }
+  return `${d.getMonth() + 1}/${d.getDate()}`
+}
 </script>
 
 <style scoped lang="less">
-.chat-container {
+.chat-layout {
   height: 100vh;
   padding: 20px;
   box-sizing: border-box;
   overflow: hidden;
+  display: flex;
+  gap: 12px;
+
+  .conversation-sidebar {
+    height: 100%;
+    background: #fff;
+    border-radius: 8px;
+    border: 1px solid #e4e7ed;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+
+    .sidebar-header {
+      padding: 12px;
+      border-bottom: 1px solid #e4e7ed;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+
+      .sidebar-title {
+        font-weight: 600;
+        font-size: 14px;
+        color: #303133;
+      }
+    }
+
+    .conversation-list {
+      flex: 1;
+      overflow-y: auto;
+
+      .conversation-item {
+        padding: 10px 12px;
+        border-bottom: 1px solid #f0f0f0;
+        cursor: pointer;
+        position: relative;
+        transition: background 0.2s;
+
+        &:hover {
+          background: #f5f7fa;
+        }
+
+        &.active {
+          background: #ecf5ff;
+          border-left: 3px solid #409eff;
+        }
+
+        .conv-title {
+          font-size: 13px;
+          color: #303133;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          margin-bottom: 4px;
+        }
+
+        .conv-meta {
+          font-size: 11px;
+          color: #909399;
+          display: flex;
+          justify-content: space-between;
+        }
+
+        .conv-delete {
+          position: absolute;
+          right: 8px;
+          top: 50%;
+          transform: translateY(-50%);
+          opacity: 0;
+          transition: opacity 0.2s;
+          color: #f56c6c;
+          cursor: pointer;
+        }
+
+        &:hover .conv-delete {
+          opacity: 1;
+        }
+      }
+
+      .empty-tip {
+        text-align: center;
+        color: #909399;
+        padding: 40px 0;
+        font-size: 13px;
+      }
+    }
+  }
 
   .box-card {
+    flex: 1;
     height: 100%;
     display: flex;
     flex-direction: column;
